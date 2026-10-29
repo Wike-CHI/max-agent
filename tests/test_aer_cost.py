@@ -192,7 +192,7 @@ def test_budget_ceiling_stops_next_claim_without_touching_fence(session):
         )
     )
     blocked = Scheduler(session).run_one(created.id)
-    assert blocked.status == TaskStatus.BLOCKED
+    assert blocked.status == TaskStatus.WAITING_APPROVAL
     assert blocked.attempts == 0
     assert svc._get_row(created.id).approved_at is None
 
