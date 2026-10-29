@@ -10,6 +10,7 @@ from typing import Iterator
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from max_agent.db.base import Base
 
@@ -34,16 +35,30 @@ def get_engine(url: str | None = None, *, echo: bool = False) -> Engine:
     global _engine, _SessionLocal
     resolved = _resolve_url(url)
     if _engine is None or (url and str(_engine.url) != resolved):
-        connect_args = {"check_same_thread": False} if resolved.startswith("sqlite") else {}
-        _engine = create_engine(resolved, echo=echo, future=True, connect_args=connect_args)
+        kwargs: dict[str, object] = {}
+        if resolved.startswith("sqlite"):
+            # NullPool: claim/finalize sessions must not share the caller's connection.
+            # timeout is sqlite3's busy wait so a single-writer CAS can queue briefly.
+            kwargs["poolclass"] = NullPool
+            kwargs["connect_args"] = {"check_same_thread": False, "timeout": 5}
+        _engine = create_engine(resolved, echo=echo, future=True, **kwargs)
         if resolved.startswith("sqlite"):
 
             @event.listens_for(_engine, "connect")
             def _sqlite_pragma(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]
+                # Let SQLAlchemy emit BEGIN so we can take a RESERVED lock up front.
+                dbapi_conn.isolation_level = None
                 cursor = dbapi_conn.cursor()
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=5000")
                 cursor.close()
+
+            @event.listens_for(_engine, "begin")
+            def _sqlite_begin_immediate(conn):  # type: ignore[no-untyped-def]
+                # Single-worker fallback: writers serialize. Combined with version CAS
+                # this stays correct if the process is killed after commit.
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
 
         _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, expire_on_commit=False)
     return _engine

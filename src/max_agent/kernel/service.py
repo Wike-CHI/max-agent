@@ -9,20 +9,16 @@ from sqlalchemy.orm import Session
 
 from max_agent.db.models import TaskRow, utcnow
 from max_agent.kernel.journal import Journal
-from max_agent.kernel.state_machine import TERMINAL, assert_transition
-from max_agent.kernel.verification import verify
+from max_agent.kernel.mutate import transition_task
+from max_agent.kernel.readmodel import task_to_read
+from max_agent.kernel.state_machine import TERMINAL
 from max_agent.models.enums import EventType, TaskStatus, WorkerKind
 from max_agent.models.schemas import (
-    BudgetConstraints,
     ScheduleRequest,
     TaskCreate,
     TaskEventRead,
     TaskRead,
-    WorkerResult,
 )
-from max_agent.policy.approval import requires_human_approval
-from max_agent.workers.base import WorkerContext
-from max_agent.workers.registry import get_worker
 
 
 class TaskService:
@@ -134,210 +130,35 @@ class TaskService:
         return self._to_read(row)
 
     def schedule(self, task_id: str, req: ScheduleRequest | None = None) -> TaskRead:
-        """Claim + run one task with the configured worker (single-worker MVP)."""
-        req = req or ScheduleRequest()
-        row = self._get_row(task_id)
-        status = TaskStatus(row.status)
+        """Commit this session, then claim/execute/finalize on short transactions.
 
-        if status in TERMINAL:
-            raise ValueError(f"cannot schedule terminal task status={status}")
+        Worker execution is not allowed to share this SQLAlchemy session.
+        """
+        self.session.commit()
+        from max_agent.kernel.scheduler import Scheduler
 
-        is_retry = row.attempts > 0 or status == TaskStatus.RETRY_WAIT
-        need, reason = requires_human_approval(
-            tags=list(row.tags or []),
-            has_side_effects=bool(row.has_side_effects),
-            is_retry=is_retry,
-            confirm_side_effects=req.confirm_side_effects,
-            allow_auto_retry_side_effects=bool(row.allow_auto_retry_side_effects),
-        )
-        if need:
-            self._transition(row, TaskStatus.BLOCKED, reason)
-            self.journal.append(
-                task_id,
-                EventType.APPROVAL_REQUIRED,
-                reason,
-                {"confirm_side_effects": req.confirm_side_effects},
-            )
-            self.session.flush()
-            return self._to_read(row)
-
-        # resolve deps
-        if not self._deps_satisfied(row):
-            self._transition(row, TaskStatus.BLOCKED, "dependencies not satisfied")
-            self.session.flush()
-            return self._to_read(row)
-
-        # Move into READY from pending / retry / blocked(after approval)
-        cur = TaskStatus(row.status)
-        if cur in {TaskStatus.PENDING, TaskStatus.RETRY_WAIT, TaskStatus.BLOCKED}:
-            self._transition(row, TaskStatus.READY, f"approved for run from {cur.value}")
-
-        kind = WorkerKind(req.worker_kind.value if req.worker_kind else row.worker_kind)
-        row.worker_kind = kind.value
-
-        # lease
-        self._transition(row, TaskStatus.LEASED, f"leased by {self.worker_id}")
-        row.leased_by = self.worker_id
-        row.lease_expires_at = None  # reserved for multi-worker TTL
-        self.journal.append(
-            task_id,
-            EventType.LEASED,
-            f"leased by {self.worker_id}",
-            {"worker_kind": kind.value},
-        )
-        self.journal.append(
-            task_id,
-            EventType.SCHEDULED,
-            "schedule accepted",
-            {"worker_kind": kind.value},
-        )
-
-        # run
-        self._transition(row, TaskStatus.RUNNING, "worker started")
-        row.attempts += 1
-        attempt_no = row.attempts
-        self.journal.append(
-            task_id,
-            EventType.ATTEMPT_STARTED,
-            f"attempt {attempt_no} started",
-            {"attempt": attempt_no, "worker_kind": kind.value},
-        )
-        self.session.flush()
-
-        tool_buffer: list[dict[str, Any]] = []
-
-        def on_tool(name: str, args: dict[str, Any]) -> None:
-            tool_buffer.append({"tool": name, "args": args})
-            self.journal.append(
-                task_id,
-                EventType.TOOL_CALL,
-                name,
-                {"args": args, "attempt": attempt_no},
-            )
-
-        worker = get_worker(kind)
-        ctx = WorkerContext(
-            task_id=task_id,
-            goal=row.goal,
-            acceptance_criteria=list(row.acceptance_criteria or []),
-            payload=dict(row.worker_payload or {}),
-            timeout_seconds=row.timeout_seconds,
-            on_tool_call=on_tool,
-        )
-
-        try:
-            result = worker.run(ctx)
-        except Exception as exc:  # noqa: BLE001 — convert to recoverable worker failure
-            result = WorkerResult(
-                ok=False,
-                summary="worker raised exception",
-                outputs={},
-                tool_calls=tool_buffer,
-                recoverable=True,
-                error=str(exc),
-            )
-
-        self.journal.append(
-            task_id,
-            EventType.ATTEMPT_FINISHED,
-            result.summary,
-            {
-                "attempt": attempt_no,
-                "ok": result.ok,
-                "error": result.error,
-                "recoverable": result.recoverable,
-            },
-        )
-        self.journal.append(
-            task_id,
-            EventType.WORKER_OUTPUT,
-            "worker outputs",
-            {"outputs": result.outputs, "tool_calls": result.tool_calls or tool_buffer},
-        )
-
-        # verify
-        self._transition(row, TaskStatus.VERIFYING, "verifying acceptance criteria")
-        v = verify(list(row.acceptance_criteria or []), result, payload=dict(row.worker_payload or {}))
-        self.journal.append(
-            task_id,
-            EventType.VERIFICATION,
-            v.message,
-            {"passed": v.passed, "checks": v.checks},
-        )
-
-        if v.passed and result.ok:
-            row.result_summary = result.summary
-            row.last_error = None
-            row.leased_by = None
-            self._transition(row, TaskStatus.SUCCEEDED, "accepted")
-        else:
-            self._handle_failure(row, result, v.message)
-
-        self.session.flush()
-        return self._to_read(row)
+        return Scheduler(self.session, worker_id=self.worker_id).run_one(task_id, req)
 
     def reopen(self, task_id: str) -> TaskRead:
         """Manual reopen of failed task → ready."""
         row = self._get_row(task_id)
-        self._transition(row, TaskStatus.READY, "manually reopened")
-        row.last_error = None
+        self._transition(
+            row,
+            TaskStatus.READY,
+            "manually reopened",
+            last_error=None,
+            failure_class=None,
+            leased_by=None,
+            lease_expires_at=None,
+            next_retry_at=None,
+        )
         self.session.flush()
         return self._to_read(row)
 
     # ----- internals -----
 
-    def _handle_failure(self, row: TaskRow, result: WorkerResult, verify_msg: str) -> None:
-        err = result.error or verify_msg or result.summary
-        row.last_error = err
-        row.result_summary = result.summary
-        row.leased_by = None
-
-        if (not result.recoverable) or row.attempts >= row.max_attempts:
-            self._transition(
-                row,
-                TaskStatus.FAILED,
-                f"failed after {row.attempts} attempt(s): {err}",
-            )
-            self.journal.append(
-                row.id,
-                EventType.ERROR,
-                row.last_error or "failed",
-                {"attempts": row.attempts, "max_attempts": row.max_attempts},
-            )
-            return
-
-        self._transition(row, TaskStatus.RETRY_WAIT, f"recoverable failure: {err}")
-        self.journal.append(
-            row.id,
-            EventType.ERROR,
-            f"recoverable; will retry ({row.attempts}/{row.max_attempts})",
-            {"error": err},
-        )
-
-    def _deps_satisfied(self, row: TaskRow) -> bool:
-        deps = list(row.dependencies or [])
-        if not deps:
-            return True
-        for dep_id in deps:
-            dep = self.session.get(TaskRow, dep_id)
-            if dep is None or TaskStatus(dep.status) != TaskStatus.SUCCEEDED:
-                return False
-        return True
-
-    def _transition(self, row: TaskRow, target: TaskStatus, message: str) -> None:
-        current = TaskStatus(row.status)
-        if current == target:
-            return
-        assert_transition(current, target)
-        row.status = target.value
-        row.updated_at = utcnow()
-        row.version = int(row.version or 1) + 1
-        self.journal.append(
-            row.id,
-            EventType.STATUS_CHANGED,
-            message,
-            {"from": current.value, "to": target.value, "version": row.version},
-        )
+    def _transition(self, row: TaskRow, target: TaskStatus, message: str, **extra: Any) -> None:
+        transition_task(self.session, row, target, message, extra=extra or None, journal=self.journal)
 
     def _get_row(self, task_id: str) -> TaskRow:
         row = self.session.get(TaskRow, task_id)
@@ -346,32 +167,4 @@ class TaskService:
         return row
 
     def _to_read(self, row: TaskRow) -> TaskRead:
-        budget = BudgetConstraints(
-            max_attempts=row.max_attempts,
-            timeout_seconds=row.timeout_seconds,
-            max_cost_units=row.max_cost_units,
-            allow_auto_retry_side_effects=row.allow_auto_retry_side_effects,
-        )
-        return TaskRead(
-            id=row.id,
-            goal=row.goal,
-            acceptance_criteria=list(row.acceptance_criteria or []),
-            priority=row.priority,
-            dependencies=list(row.dependencies or []),
-            status=TaskStatus(row.status),
-            attempts=row.attempts,
-            max_attempts=row.max_attempts,
-            timeout_seconds=row.timeout_seconds,
-            budget=budget,
-            idempotency_key=row.idempotency_key,
-            worker_kind=WorkerKind(row.worker_kind),
-            worker_payload=dict(row.worker_payload or {}),
-            has_side_effects=bool(row.has_side_effects),
-            tags=list(row.tags or []),
-            result_summary=row.result_summary,
-            last_error=row.last_error,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-            leased_by=row.leased_by,
-            lease_expires_at=row.lease_expires_at,
-        )
+        return task_to_read(row)

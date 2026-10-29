@@ -38,6 +38,10 @@ uv run max-agent create "echo hello" \
 # Run it
 uv run max-agent run <TASK_ID>
 
+# After a crash, expired leases are requeued. Side effects without an
+# idempotency key stay blocked until --confirm-side-effects.
+uv run max-agent recover
+
 # Inspect
 uv run max-agent get <TASK_ID>
 uv run max-agent events <TASK_ID>

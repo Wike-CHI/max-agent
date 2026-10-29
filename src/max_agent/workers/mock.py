@@ -19,6 +19,15 @@ class MockWorker(Worker):
     def run(self, ctx: WorkerContext) -> WorkerResult:
         mode = str(ctx.payload.get("mode", "success"))
         delay = float(ctx.payload.get("delay_seconds", 0))
+        # "sleep" ignores the context timeout so the kernel's lease timeout can fire.
+        if mode == "sleep":
+            time.sleep(delay if delay > 0 else 0)
+            return WorkerResult(
+                ok=True,
+                summary="mock sleep finished",
+                outputs={"mode": mode, "answer": "slept"},
+                recoverable=True,
+            )
         if delay > 0:
             time.sleep(min(delay, ctx.timeout_seconds))
 
