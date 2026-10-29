@@ -2,7 +2,7 @@
 
 MAX is the task kernel. Grok Bot is the entry. Do not store the task only in the chat, and do not keep a process alive to poll.
 
-Safe demos use `worker_kind=mock` or `local_code`. They do not need production credentials. Do not attach a worker that can deploy, pay, or write to production.
+Safe demos use `worker_kind=mock` or `local_code`. `worker_kind=cli` runs inside an isolated worktree and uses the in-repo stub unless the operator has set `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` outside the bot. Do not set that variable, and do not attach a worker that can deploy, pay, or write to production. None of these workers receive production credentials.
 
 ## One-shot CLI
 
@@ -72,4 +72,4 @@ Body field `idempotency_key` is required. The same delivery id returns the origi
 
 ## 中文
 
-Grok 只负责下发和取回。`create` 马上给出 `task_id`。需要证据时再调用一次 `status`（里面有 `verification`）和 `events`。不要写轮询循环。`run` 是本地 worker 的一次执行。发布、付费、远程写必须先 `approve`。mock / local_code 演示不要配置生产密钥。
+Grok 只负责下发和取回。`create` 马上给出 `task_id`。需要证据时再调用一次 `status`（里面有 `verification`）和 `events`。不要写轮询循环。`run` 是本地 worker 的一次执行。发布、付费、远程写必须先 `approve`。mock / local_code / cli 演示不要配置生产密钥。不要替用户打开 `MAX_AGENT_ALLOW_EXTERNAL_CLI`。

@@ -53,6 +53,12 @@ uv run max-agent create "write adder" \
   -w local_code \
   --payload '{"action":"write_and_pytest","path":"/tmp/max_agent_mvp_demo.py","test_path":"/tmp/test_max_agent_mvp_demo.py"}'
 
+# CLI worker: isolated worktree + stub. Does not call Grok or Codex.
+uv run max-agent create "implement add" \
+  -c worker_ok -c output_key:adapter_version \
+  -w cli \
+  --payload '{"vendor":"auto","workspace_root":"/tmp/max-agent-workspaces"}'
+
 # Side-effect retry needs confirmation
 uv run max-agent run <TASK_ID> --confirm-side-effects
 ```

@@ -87,3 +87,25 @@ Demo (`caller_poll_loops` is 0). The bot called `create`, then one worker `run`,
   }
 }
 ```
+
+## v0.4 CLI worker (Issue #4)
+
+Captured: 2026-10-29. Host Python 3.12.3, uv 0.13.6. `grok` and `codex` were not on `PATH`, so real CLI processes were not started.
+
+```
+$ uv sync --locked --extra dev
+$ uv run --no-sync pytest -q
+58 passed, 1 warning in 11.31s
+$ uv build
+Successfully built dist/max_agent-0.1.0.tar.gz
+Successfully built dist/max_agent-0.1.0-py3-none-any.whl
+```
+
+The pre-existing warning is Starlette's `httpx` TestClient deprecation. It is not from the CLI worker.
+
+CLI smoke (sqlite file under `/tmp`, vendor `auto`, no `MAX_AGENT_ALLOW_EXTERNAL_CLI`):
+
+- create `ce943e27-7533-4607-8715-43279e088929` status `ready`, attempts 0
+- run status `succeeded`, worker `cli`, attempts 1, summary `cli fixture verified`
+
+The wheel contains `max_agent/workers/fixtures/cli_issue/ISSUE.md`.
