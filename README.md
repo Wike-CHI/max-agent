@@ -102,7 +102,9 @@ uv run max-agent mcp   # stdio JSON-RPC: initialize, tools/list, tools/call
 
 ```bash
 uv run max-agent serve --host 127.0.0.1 --port 8080
-# GET  /v1/health
+# GET  /v1/health                 # liveness: process up, version
+# GET  /v1/ready                  # readiness: SELECT 1
+# GET  /v1/telemetry              # in-process HTTP spans and counters
 # POST /v1/tasks
 # GET  /v1/tasks/{id}
 # GET  /v1/tasks/{id}/status          # same envelope as `max-agent --json status`
@@ -140,7 +142,8 @@ uv run pytest -q
 - [Product roadmap](docs/ROADMAP.md): v0.1 MVP → Grok entry → durable execution → real workers → cost and orchestration.
 - [Contribution / Issue–PR protocol](CONTRIBUTING.md): Issue → branch → PR → CI → squash merge → reviewed version tag.
 - [CI workflow](.github/workflows/ci.yml): issue-link, Python 3.12/3.13 tests, CLI startup and package build.
-- [Release workflow](.github/workflows/release.yml): manually tagged versions get tested and packaged as GitHub Releases. Production deploy remains manual.
+- [Release workflow](.github/workflows/release.yml): manually tagged versions get tested, packaged, checksummed, and published as GitHub Releases. The provenance file is an unsigned SHA256 predicate.
+- [Operations runbook](docs/operations/README.md): supply-chain audit, restore drill, staging smoke, production approval gate, health/SLO, and the branch-protection fallback. Production deploy remains manual.
 
 ## Safety
 

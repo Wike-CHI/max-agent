@@ -124,3 +124,5 @@ Inbound webhook（`POST /v1/inbound/webhook`）校验 HMAC，用 `X-Max-Delivery
 ## 回滚
 
 `alembic downgrade c4a91e0b7d55` 会删除 `aer_exports` 以及任务上的 `issue_ref` / `budget_ceilings`、attempt 上的成本列。已导出到 `MAX_AGENT_AER_DIR` 的 JSON 是本地文件，删除该目录即可。这个变更不调用外部付费 API，也没有生产部署。
+
+当前 head 的 `alembic downgrade -1` 只去掉审批列，不删除 `task_events`。数据回滚以快照恢复为准，步骤在 `docs/operations/postgres.md`。发布和审批门禁在 `docs/operations/`。

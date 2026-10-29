@@ -39,7 +39,16 @@ uv build
 
 ## Repository limitations
 
-The repository was **private** when this process was established. GitHub REST ruleset read returned HTTP 403 with the message that GitHub Pro or public visibility is required. Branch protection/check enforcement may therefore be unavailable until plan/visibility changes; use manual PR discipline in the interim. See the official GitHub plan requirements. Do not make the repository public just to gain the feature without explicit approval.
+The repository was **private** when this process was established. GitHub REST ruleset read returned HTTP 403 with the message that GitHub Pro or public visibility is required. Branch protection/check enforcement may therefore be unavailable until plan/visibility changes. Do not make the repository public just to gain the feature without explicit approval.
+
+Until a ruleset can require checks, run the local gate and only then squash-merge in the GitHub UI. The script does not merge or push:
+
+```bash
+gh pr view <PR> --json reviews,statusCheckRollup > /tmp/max-agent-pr.json
+uv run --no-sync python scripts/merge_gate.py --payload /tmp/max-agent-pr.json --target master
+```
+
+Details: [docs/operations/branch-protection.md](docs/operations/branch-protection.md).
 
 ## Agent (Grok Bot) operating contract
 
