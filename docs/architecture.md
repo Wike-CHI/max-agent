@@ -21,6 +21,7 @@ MAX-Agent 是可独立部署的任务内核；Grok Bot 作为自然语言入口�
 │  Workers (可替换)                            │
 │  - MockWorker                                │
 │  - LocalCodeWorker（本地写文件 + pytest）    │
+│  - CliWorker（隔离 worktree；默认 stub）     │
 ├─────────────────────────────────────────────┤
 │  Persistence: SQLAlchemy 2 + SQLite          │
 │  (schema 兼容 PostgreSQL)                    │
@@ -95,7 +96,7 @@ Inbound webhook（`POST /v1/inbound/webhook`）校验 HMAC，用 `X-Max-Delivery
 
 - 标签含 `delete|deploy|payment|publish|permission|production|external_write` → 必须先 `approve`。`run --confirm-side-effects` 不能代替这次授权。
 - `has_side_effects=true` 的重试仍需 `--confirm-side-effects`、budget 显式允许、幂等键，或已经 `approve`。
-- **不实现真实支付/部署**；仅策略钩子。mock / local_code 演示不需要生产凭证。
+- **不实现真实支付/部署**；仅策略钩子。mock / local_code / cli（默认 stub）演示不需要生产凭证。真实 Grok Build 或 Codex 仅在 `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` 且版本探测成功后启动。
 
 ## 非目标（MVP）
 

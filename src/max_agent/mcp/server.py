@@ -92,7 +92,7 @@ def tool_specs() -> list[dict[str, Any]]:
                 "properties": {
                     "goal": {"type": "string"},
                     "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                    "worker_kind": {"type": "string", "enum": ["mock", "local_code"]},
+                    "worker_kind": {"type": "string", "enum": ["mock", "local_code", "cli"]},
                     "worker_payload": {"type": "object"},
                     "idempotency_key": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}},

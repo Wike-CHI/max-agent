@@ -21,6 +21,7 @@ app = typer.Typer(name="max-agent", help="MAX-Agent task scheduler kernel CLI", 
 class WorkerKindOpt(str, Enum):
     mock = "mock"
     local_code = "local_code"
+    cli = "cli"
 
 
 def _print(obj: object) -> None:
