@@ -1,0 +1,69 @@
+name: Deploy gate
+
+# Manual gate only. This workflow never deploys, publishes, or writes to the repository.
+# Production is recorded only after verify passes and a human types APPROVE.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: staging smoke or production approval gate
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      approval:
+        description: Production only. Type APPROVE to record human approval.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked --extra dev --python 3.12
+      - name: Tests
+        run: uv run --no-sync pytest -q
+      - name: Staging smoke
+        run: uv run --no-sync python scripts/staging_smoke.py
+      - name: Restore drill
+        run: uv run --no-sync python scripts/restore_drill.py
+
+  production-gate:
+    name: production-gate
+    needs: verify
+    if: inputs.target == 'production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked --extra dev --python 3.12
+      - name: Record approval gate
+        env:
+          MAX_AGENT_DEPLOY_APPROVAL: ${{ inputs.approval == 'APPROVE' && format('approved-by:{0}', github.actor) || '' }}
+        run: uv run --no-sync python scripts/deploy_gate.py --target production --ci-passed
+      - name: Stop before any deploy
+        run: echo "Production gate recorded. No deploy step exists in this workflow."

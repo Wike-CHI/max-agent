@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from max_agent.db.session import session_scope
+from max_agent.ops.health import database_ready, liveness
+from max_agent.ops.telemetry import get_telemetry
 from max_agent.entry.contract import envelope
 from max_agent.entry.webhook import WebhookError, accept_inbound, verify_signature
 from max_agent.kernel.scheduler import Scheduler
@@ -29,7 +31,22 @@ router = APIRouter(prefix="/v1")
 
 @router.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "max-agent"}
+    return liveness()
+
+
+@router.get("/ready")
+def ready() -> dict[str, str]:
+    try:
+        database_ready()
+    except Exception:
+        raise HTTPException(status_code=503, detail="database unavailable") from None
+    return {"status": "ready", "database": "ok"}
+
+
+@router.get("/telemetry")
+def telemetry() -> dict:
+    """In-process counters and recent spans. Not the economics report at /metrics."""
+    return get_telemetry().snapshot()
 
 
 @router.post("/tasks", response_model=TaskRead)

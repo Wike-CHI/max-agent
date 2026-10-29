@@ -25,8 +25,8 @@ jobs:
         run: uv run --no-sync pytest -q
       - name: Build distributions
         run: uv build
-      - name: Generate SHA256 checksums
-        run: cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS
+      - name: Generate checksums and unsigned provenance
+        run: uv run --no-sync python scripts/release_provenance.py --dist dist
       - name: Save release artifacts
         uses: actions/upload-artifact@v4
         with:

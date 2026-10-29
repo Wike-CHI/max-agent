@@ -50,3 +50,24 @@ jobs:
         run: uv run --no-sync max-agent --help
       - name: Build wheel and sdist
         run: uv build
+      - name: Dependency lock audit
+        run: uv run --no-sync python scripts/audit_dependencies.py
+
+  staging-smoke:
+    name: staging-smoke
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev --python 3.12
+      - name: Staging smoke
+        run: uv run --no-sync python scripts/staging_smoke.py
+      - name: SQLite restore drill
+        run: uv run --no-sync python scripts/restore_drill.py
