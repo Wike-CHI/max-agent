@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  issue-link:
+    name: issue-link
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require linked Issue
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python scripts/check_pr_issue_link.py
+
+  tests:
+    name: test-py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Install Python
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev --python ${{ matrix.python-version }}
+      - name: Unit tests
+        run: uv run --no-sync pytest -q
+      - name: CLI startup
+        run: uv run --no-sync max-agent --help
+      - name: Build wheel and sdist
+        run: uv build

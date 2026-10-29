@@ -1,0 +1,53 @@
+name: Build and GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-package:
+    name: verify-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked --extra dev --python 3.13
+      - name: Test tagged source
+        run: uv run --no-sync pytest -q
+      - name: Build distributions
+        run: uv build
+      - name: Generate SHA256 checksums
+        run: cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS
+      - name: Save release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: max-agent-distributions
+          path: dist/
+          if-no-files-found: error
+
+  github-release:
+    name: github-release
+    needs: verify-package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@v4
+        with:
+          name: max-agent-distributions
+          path: dist/
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
