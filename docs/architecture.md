@@ -42,7 +42,9 @@ MAX-Agent 是可独立部署的任务内核；Grok Bot 作为自然语言入口�
 | budget | max_cost_units、allow_auto_retry_side_effects |
 | has_side_effects | 外部副作用标记；重试需确认 |
 | worker_kind / worker_payload | Worker 类型与参数 |
-| version | 乐观版本，防并发覆盖 |
+| version | 乐观版本，claim / finalize 用 CAS 防并发覆盖 |
+| fencing_token | 租约代次；过期抢占后旧 worker 的 finalize 会被拒绝 |
+| lease / attempt | `leased_by` + `lease_expires_at`，以及 `task_attempts.lease_owner` |
 
 ## 状态机
 
@@ -58,13 +60,25 @@ running / verifying → retry_wait → ready (再跑)
 
 ## Scheduler
 
-- MVP：单 Worker 串行 `run_one(task_id)`。
-- 预留 `LeaseManager`、`CapabilityMatcher` 接口，便于多 Worker / 能力路由。
-- 所有状态变更经 `TaskService`，保证单一写路径。
+- `run_one` 分成三段，并且每段各自提交：
+  1. **claim+commit**：写入 `RUNNING`、租约 owner / `lease_expires_at` / `fencing_token` 和 `task_attempts` 行。
+  2. **execute**：`worker.run()` 不持有 SQLAlchemy session。工具事件用单独的短事务写入。
+  3. **finalize+commit**：对照验收条件；fencing token 不匹配则拒绝迟到结果。
+- PostgreSQL claim 使用 `SELECT ... FOR UPDATE SKIP LOCKED`。SQLite 使用 `BEGIN IMMEDIATE` + version/status CAS，作为单 worker fallback，进程被杀掉后已提交的租约仍然在。
+- 过期租约在下次 `run` / `recover` 时回收。无幂等键且未允许自动重试的副作用任务进入 `blocked`，不会自动再跑。
+- `retry_wait.next_retry_at` 按尝试次数指数退避。显式 `run <id>` 可以立刻重试；自动捞取会等到到期。
+- 预留 `LeaseManager`、`CapabilityMatcher` 类型。持久锁是数据库租约，不是内存对象。
 
 ## Verification
 
 Worker 返回 `WorkerResult.ok` 只表示执行完成；内核对照 `acceptance_criteria` 验证后才可进入 `succeeded`。
+
+失败分类写在任务和 attempt 上：
+
+- `execution`：worker 报失败或抛异常
+- `verification`：worker 自报成功，但验收未过
+- `timeout`：超过 `timeout_seconds` 仍未返回（线程无法被杀死，只放弃这次 finalize）
+- `crash`：租约过期仍未 finalize，按进程崩溃 / 失联处理
 
 ## Journal / AER
 

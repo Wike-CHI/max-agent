@@ -31,6 +31,7 @@ class TaskRow(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_tasks_idempotency_key"),
         Index("ix_tasks_status_priority", "status", "priority"),
+        Index("ix_tasks_status_lease", "status", "lease_expires_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -53,6 +54,9 @@ class TaskRow(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     leased_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failure_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # optimistic lock
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -61,6 +65,9 @@ class TaskRow(Base):
 
     events: Mapped[list[TaskEventRow]] = relationship(
         back_populates="task", cascade="all, delete-orphan", order_by="TaskEventRow.id"
+    )
+    attempt_rows: Mapped[list[TaskAttemptRow]] = relationship(
+        back_populates="task", cascade="all, delete-orphan", order_by="TaskAttemptRow.attempt_no"
     )
 
 
@@ -76,3 +83,31 @@ class TaskEventRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     task: Mapped[TaskRow] = relationship(back_populates="events")
+
+
+class TaskAttemptRow(Base):
+    """One worker execution attempt plus the lease generation that owned it."""
+
+    __tablename__ = "task_attempts"
+    __table_args__ = (
+        UniqueConstraint("task_id", "attempt_no", name="uq_task_attempts_task_no"),
+        Index("ix_task_attempts_task_fence", "task_id", "fencing_token"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=False)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    failure_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    worker_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    recoverable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    task: Mapped[TaskRow] = relationship(back_populates="attempt_rows")

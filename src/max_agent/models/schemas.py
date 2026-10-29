@@ -63,6 +63,9 @@ class TaskRead(BaseModel):
     updated_at: datetime
     leased_by: str | None = None
     lease_expires_at: datetime | None = None
+    fencing_token: int = 0
+    next_retry_at: datetime | None = None
+    failure_class: str | None = None
 
     model_config = {"from_attributes": True}
 

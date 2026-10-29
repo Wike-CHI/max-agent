@@ -42,9 +42,9 @@ def get_task(task_id: str) -> TaskRead:
 
 @router.post("/tasks/{task_id}/schedule", response_model=TaskRead)
 def schedule_task(task_id: str, body: ScheduleRequest | None = None) -> TaskRead:
+    # Scheduler opens its own short transactions. Do not hold a session across worker.run().
     try:
-        with session_scope() as session:
-            return Scheduler(session).run_one(task_id, body)
+        return Scheduler().run_one(task_id, body)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

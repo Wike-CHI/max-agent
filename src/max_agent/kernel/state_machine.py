@@ -13,7 +13,14 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         {TaskStatus.LEASED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
     ),
     TaskStatus.LEASED: frozenset(
-        {TaskStatus.RUNNING, TaskStatus.READY, TaskStatus.CANCELLED, TaskStatus.FAILED}
+        {
+            TaskStatus.RUNNING,
+            TaskStatus.READY,
+            TaskStatus.CANCELLED,
+            TaskStatus.FAILED,
+            TaskStatus.RETRY_WAIT,
+            TaskStatus.BLOCKED,
+        }
     ),
     TaskStatus.RUNNING: frozenset(
         {

@@ -31,6 +31,23 @@ class TaskStatus(StrEnum):
     RETRY_WAIT = "retry_wait"
 
 
+class FailureClass(StrEnum):
+    """Why an attempt did not succeed. Worker ok=true is not success."""
+
+    EXECUTION = "execution"
+    VERIFICATION = "verification"
+    TIMEOUT = "timeout"
+    CRASH = "crash"
+
+
+class AttemptStatus(StrEnum):
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    TIMED_OUT = "timed_out"
+
+
 class EventType(StrEnum):
     CREATED = "created"
     STATUS_CHANGED = "status_changed"
@@ -45,6 +62,10 @@ class EventType(StrEnum):
     CANCELLED = "cancelled"
     APPROVAL_REQUIRED = "approval_required"
     IDEMPOTENT_HIT = "idempotent_hit"
+    LEASE_EXPIRED = "lease_expired"
+    RECOVERED = "recovered"
+    FENCING_REJECTED = "fencing_rejected"
+    INTERRUPTED = "interrupted"
 
 
 class WorkerKind(StrEnum):

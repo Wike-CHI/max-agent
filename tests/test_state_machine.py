@@ -8,6 +8,8 @@ def test_legal_happy_path():
     assert can_transition(TaskStatus.PENDING, TaskStatus.READY)
     assert can_transition(TaskStatus.READY, TaskStatus.LEASED)
     assert can_transition(TaskStatus.LEASED, TaskStatus.RUNNING)
+    assert can_transition(TaskStatus.LEASED, TaskStatus.RETRY_WAIT)
+    assert can_transition(TaskStatus.LEASED, TaskStatus.BLOCKED)
     assert can_transition(TaskStatus.RUNNING, TaskStatus.VERIFYING)
     assert can_transition(TaskStatus.VERIFYING, TaskStatus.SUCCEEDED)
 

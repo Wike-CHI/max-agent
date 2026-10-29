@@ -2,8 +2,8 @@
 
 ## MVP 已知限制
 
-1. **单 Worker**：无真实租约 TTL / 心跳抢占；`LeaseManager` 仅为空实现。
-2. **无多进程锁**：依赖单写路径 + SQLite；多进程并发需 PostgreSQL + 行锁/租约。
+1. **SQLite 单写者**：租约 TTL、fencing token 和崩溃恢复已落地。SQLite 用 `BEGIN IMMEDIATE` + CAS，不支持 `SKIP LOCKED`；多 worker 并发抢同一任务时后来者会等待锁然后失败，而不是并行跳过。PostgreSQL 才走 `FOR UPDATE SKIP LOCKED`。
+2. **超时不能杀死线程**：超时后内核提交 `timed_out` 并不再采纳该次结果，但进程内线程可能仍在跑。副作用任务因此不会在无幂等键时自动重放。
 3. **验收器较简**：规则型 criteria，无 LLM-as-judge / 截图对比。
 4. **LocalCodeWorker**：仅允许写 `/workspace` 与 `/tmp`；不调用外部编码 Agent CLI。
 5. **无 MCP adapter**：仅 CLI + HTTP；MCP 工具层留待下一阶段。
@@ -16,7 +16,7 @@
 ## 下一阶段建议
 
 1. 接入真实编码 CLI（Codex / Claude Code / Cursor Cloud Agent）作为 Worker，经用户授权后启用。
-2. 实现租约 + 多 Worker 进程；切换 PostgreSQL。
+2. 生产环境切换 PostgreSQL，让多 worker 使用 SKIP LOCKED 并行抢占。
 3. 提供 MCP server adapter，供 Grok Bot 直接调用 `create/run/events`。
 4. 丰富 Verification（pytest 报告解析、artifact hash、黄金文件）。
 5. AER 导出（OpenTelemetry / 自定义 Agent Execution Record）。

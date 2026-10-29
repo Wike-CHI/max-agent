@@ -109,9 +109,15 @@ def run_cmd(
         worker_kind=WorkerKind(worker.value) if worker else None,
         confirm_side_effects=confirm_side_effects,
     )
-    with session_scope() as session:
-        task = Scheduler(session).run_one(task_id, req)
+    task = Scheduler().run_one(task_id, req)
     _print(task)
+
+
+@app.command("recover")
+def recover_cmd() -> None:
+    """Requeue or block tasks whose lease expired. Use after a process restart."""
+    tasks = Scheduler().recover_expired()
+    _print(tasks)
 
 
 @app.command("cancel")
