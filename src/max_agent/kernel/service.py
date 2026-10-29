@@ -8,8 +8,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from max_agent.db.models import TaskRow, utcnow
+from max_agent.kernel.errors import LeaseHeldError
 from max_agent.kernel.journal import Journal
-from max_agent.kernel.mutate import transition_task
+from max_agent.kernel.mutate import cas_update, transition_task
 from max_agent.kernel.readmodel import task_to_read
 from max_agent.kernel.state_machine import TERMINAL
 from max_agent.models.enums import EventType, TaskStatus, WorkerKind
@@ -19,6 +20,7 @@ from max_agent.models.schemas import (
     TaskEventRead,
     TaskRead,
 )
+from max_agent.policy.approval import sensitive_tags
 
 
 class TaskService:
@@ -73,7 +75,9 @@ class TaskService:
                     {"idempotency_key": data.idempotency_key},
                 )
                 self.session.flush()
-                return self._to_read(existing)
+                replay = self._to_read(existing)
+                replay.idempotent_replay = True
+                return replay
 
         budget = data.budget
         timeout = data.timeout_seconds if data.timeout_seconds is not None else budget.timeout_seconds
@@ -116,6 +120,20 @@ class TaskService:
         if initial == TaskStatus.PENDING and not data.dependencies:
             self._transition(row, TaskStatus.READY, "no dependencies; marked ready")
 
+        found = sensitive_tags(list(data.tags))
+        if found:
+            reason = f"sensitive tags require approval: {found}"
+            if TaskStatus(row.status) != TaskStatus.BLOCKED:
+                self._transition(row, TaskStatus.BLOCKED, reason, last_error=reason)
+            else:
+                row.last_error = reason
+            self.journal.append(
+                task_id,
+                EventType.APPROVAL_REQUIRED,
+                reason,
+                {"tags": found},
+            )
+
         self.session.flush()
         return self._to_read(row)
 
@@ -126,6 +144,49 @@ class TaskService:
             raise ValueError(f"cannot cancel terminal task in status={status}")
         self._transition(row, TaskStatus.CANCELLED, "cancelled by user")
         self.journal.append(task_id, EventType.CANCELLED, "task cancelled")
+        self.session.flush()
+        return self._to_read(row)
+
+    def approve(self, task_id: str, *, actor: str = "user", note: str = "") -> TaskRead:
+        """Record an explicit user grant. Sensitive tags cannot run without it."""
+        row = self._get_row(task_id)
+        status = TaskStatus(row.status)
+        if status in {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
+            raise ValueError(f"cannot approve task in status={status.value}")
+        if status in {TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.VERIFYING}:
+            raise ValueError(f"cannot approve in-flight task status={status.value}")
+
+        actor_name = (actor or "user").strip()[:128] or "user"
+        note_value = note.strip() if note else None
+        already = row.approved_at is not None
+        extra = {
+            "approved_at": utcnow(),
+            "approved_by": actor_name,
+            "approval_note": note_value,
+            "last_error": None,
+        }
+        changed = False
+        if status == TaskStatus.BLOCKED and self._deps_satisfied(row):
+            transition_task(
+                self.session,
+                row,
+                TaskStatus.READY,
+                f"approved by {actor_name}",
+                extra=extra,
+                journal=self.journal,
+            )
+            changed = True
+        elif not already:
+            if not cas_update(self.session, row, extra):
+                raise LeaseHeldError(f"concurrent update on task {task_id}")
+            changed = True
+        if changed:
+            self.journal.append(
+                task_id,
+                EventType.APPROVED,
+                f"approved by {actor_name}",
+                {"actor": actor_name, "note": note_value or ""},
+            )
         self.session.flush()
         return self._to_read(row)
 
@@ -159,6 +220,13 @@ class TaskService:
 
     def _transition(self, row: TaskRow, target: TaskStatus, message: str, **extra: Any) -> None:
         transition_task(self.session, row, target, message, extra=extra or None, journal=self.journal)
+
+    def _deps_satisfied(self, row: TaskRow) -> bool:
+        for dep_id in list(row.dependencies or []):
+            dep = self.session.get(TaskRow, dep_id)
+            if dep is None or TaskStatus(dep.status) != TaskStatus.SUCCEEDED:
+                return False
+        return True
 
     def _get_row(self, task_id: str) -> TaskRow:
         row = self.session.get(TaskRow, task_id)

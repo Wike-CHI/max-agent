@@ -61,6 +61,8 @@ class EventType(StrEnum):
     ERROR = "error"
     CANCELLED = "cancelled"
     APPROVAL_REQUIRED = "approval_required"
+    APPROVED = "approved"
+    INBOUND = "inbound"
     IDEMPOTENT_HIT = "idempotent_hit"
     LEASE_EXPIRED = "lease_expired"
     RECOVERED = "recovered"

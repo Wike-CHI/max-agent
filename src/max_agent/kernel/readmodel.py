@@ -39,4 +39,7 @@ def task_to_read(row: TaskRow) -> TaskRead:
         fencing_token=int(row.fencing_token or 0),
         next_retry_at=row.next_retry_at,
         failure_class=row.failure_class,
+        approved_at=row.approved_at,
+        approved_by=row.approved_by,
+        approval_note=row.approval_note,
     )

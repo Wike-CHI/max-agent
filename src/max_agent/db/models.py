@@ -57,6 +57,9 @@ class TaskRow(Base):
     fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approval_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # optimistic lock
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -111,3 +114,16 @@ class TaskAttemptRow(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     task: Mapped[TaskRow] = relationship(back_populates="attempt_rows")
+
+
+class InboundDeliveryRow(Base):
+    """One webhook/Routine delivery. Replays of delivery_id do not create a second task."""
+
+    __tablename__ = "inbound_deliveries"
+    __table_args__ = (Index("ix_inbound_idempotency", "idempotency_key"),)
+
+    delivery_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=False)
+    body_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
