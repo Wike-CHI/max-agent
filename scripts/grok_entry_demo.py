@@ -164,7 +164,7 @@ def main() -> int:
         and (status.get("verification") or {}).get("passed") is True
         and status.get("task_id") == task_id
         and blocked.get("approval_required") is True
-        and still_blocked.get("status") == "blocked"
+        and still_blocked.get("status") == "waiting_approval"
         and published.get("status") == "succeeded"
         and inbound.get("replay_deduplicated") is True
         and inbound.get("same_task") is True

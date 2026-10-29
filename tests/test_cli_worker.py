@@ -447,5 +447,5 @@ def test_production_tag_still_blocks_before_the_worker(session, tmp_path: Path) 
         tags=["production"],
         criteria=["worker_ok"],
     )
-    assert out.status == TaskStatus.BLOCKED
+    assert out.status == TaskStatus.WAITING_APPROVAL
     assert not (tmp_path / "blocked").exists()

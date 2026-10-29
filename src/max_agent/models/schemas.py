@@ -62,6 +62,49 @@ class TaskCreate(BaseModel):
         return [c.strip() for c in v if c and c.strip()]
 
 
+class GraphNode(BaseModel):
+    """One node in a task graph. `depends_on` entries are sibling keys or existing task ids."""
+
+    key: str = Field(..., min_length=1, max_length=128)
+    goal: str = Field(..., min_length=1, max_length=4000)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    priority: int = Field(default=100, ge=0, le=1000)
+    depends_on: list[str] = Field(default_factory=list)
+    timeout_seconds: int | None = None
+    budget: BudgetConstraints = Field(default_factory=BudgetConstraints)
+    idempotency_key: str | None = Field(default=None, max_length=128)
+    worker_kind: WorkerKind = WorkerKind.MOCK
+    worker_payload: dict[str, Any] = Field(default_factory=dict)
+    has_side_effects: bool = False
+    tags: list[str] = Field(default_factory=list)
+    issue_ref: str | None = Field(default=None, max_length=256)
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def _nonempty_node_criteria(cls, v: list[str]) -> list[str]:
+        return [c.strip() for c in v if c and c.strip()]
+
+    def to_create(self) -> TaskCreate:
+        return TaskCreate(
+            goal=self.goal,
+            acceptance_criteria=list(self.acceptance_criteria),
+            priority=self.priority,
+            dependencies=[],
+            timeout_seconds=self.timeout_seconds,
+            budget=self.budget,
+            idempotency_key=self.idempotency_key,
+            worker_kind=self.worker_kind,
+            worker_payload=dict(self.worker_payload),
+            has_side_effects=self.has_side_effects,
+            tags=list(self.tags),
+            issue_ref=self.issue_ref,
+        )
+
+
+class TaskGraphCreate(BaseModel):
+    nodes: list[GraphNode] = Field(..., min_length=1)
+
+
 class TaskRead(BaseModel):
     id: str
     goal: str
@@ -90,6 +133,10 @@ class TaskRead(BaseModel):
     approved_at: datetime | None = None
     approved_by: str | None = None
     approval_note: str | None = None
+    approval_scope: list[str] = Field(default_factory=list)
+    approval_expires_at: datetime | None = None
+    approval_decision: str | None = None
+    cancel_requested_at: datetime | None = None
     issue_ref: str | None = None
     idempotent_replay: bool = Field(
         default=False,
@@ -112,6 +159,16 @@ class TaskEventRead(BaseModel):
 
 
 class ApproveRequest(BaseModel):
+    actor: str = Field(default="user", max_length=128)
+    note: str = Field(default="", max_length=2000)
+    scope: list[str] = Field(
+        default_factory=list,
+        description="Permission scope. Empty means the task's sensitive tags, or 'run' when it has none.",
+    )
+    ttl_seconds: int | None = Field(default=None, ge=1, le=86400 * 30)
+
+
+class RejectRequest(BaseModel):
     actor: str = Field(default="user", max_length=128)
     note: str = Field(default="", max_length=2000)
 

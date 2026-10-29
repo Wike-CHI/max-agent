@@ -60,6 +60,10 @@ class TaskRow(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     approval_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approval_scope: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    approval_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approval_decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     issue_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
     budget_ceilings: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # optimistic lock

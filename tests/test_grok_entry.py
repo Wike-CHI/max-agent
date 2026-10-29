@@ -166,11 +166,11 @@ def test_publish_stays_blocked_until_approve(db_url: str):
             "grok-publish",
         ],
     )
-    assert created["status"] == "blocked"
+    assert created["status"] == "waiting_approval"
     assert created["approval_required"] is True
 
     blocked = _invoke(db_url, ["--json", "run", created["task_id"], "--confirm-side-effects"])
-    assert blocked["status"] == "blocked"
+    assert blocked["status"] == "waiting_approval"
     assert blocked["approval_required"] is True
 
     approved = _invoke(

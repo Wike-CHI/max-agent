@@ -7,10 +7,10 @@ from max_agent.models.enums import TaskStatus
 # from -> frozenset of allowed next states
 TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.PENDING: frozenset(
-        {TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
+        {TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.WAITING_APPROVAL, TaskStatus.CANCELLED}
     ),
     TaskStatus.READY: frozenset(
-        {TaskStatus.LEASED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
+        {TaskStatus.LEASED, TaskStatus.BLOCKED, TaskStatus.WAITING_APPROVAL, TaskStatus.CANCELLED}
     ),
     TaskStatus.LEASED: frozenset(
         {
@@ -20,6 +20,7 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.FAILED,
             TaskStatus.RETRY_WAIT,
             TaskStatus.BLOCKED,
+            TaskStatus.WAITING_APPROVAL,
         }
     ),
     TaskStatus.RUNNING: frozenset(
@@ -28,6 +29,7 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.RETRY_WAIT,
             TaskStatus.FAILED,
             TaskStatus.BLOCKED,
+            TaskStatus.WAITING_APPROVAL,
             TaskStatus.CANCELLED,
         }
     ),
@@ -37,13 +39,30 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.RETRY_WAIT,
             TaskStatus.FAILED,
             TaskStatus.BLOCKED,
+            TaskStatus.WAITING_APPROVAL,
+            TaskStatus.CANCELLED,
         }
     ),
     TaskStatus.RETRY_WAIT: frozenset(
-        {TaskStatus.READY, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}
+        {
+            TaskStatus.READY,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.BLOCKED,
+            TaskStatus.WAITING_APPROVAL,
+        }
     ),
     TaskStatus.BLOCKED: frozenset(
-        {TaskStatus.READY, TaskStatus.PENDING, TaskStatus.CANCELLED, TaskStatus.FAILED}
+        {
+            TaskStatus.READY,
+            TaskStatus.PENDING,
+            TaskStatus.WAITING_APPROVAL,
+            TaskStatus.CANCELLED,
+            TaskStatus.FAILED,
+        }
+    ),
+    TaskStatus.WAITING_APPROVAL: frozenset(
+        {TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.CANCELLED, TaskStatus.FAILED}
     ),
     TaskStatus.SUCCEEDED: frozenset(),  # terminal
     TaskStatus.FAILED: frozenset({TaskStatus.READY}),  # manual re-open only

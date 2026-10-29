@@ -51,11 +51,14 @@ MAX-Agent 是可独立部署的任务内核；Grok Bot 作为自然语言入口�
 
 ```
 pending → ready → leased → running → verifying → succeeded
-                 ↘ blocked
+                 ↘ blocked          （依赖未完成，或副作用重试待确认）
+                 ↘ waiting_approval （审批门：审批人、权限范围、过期）
 running / verifying → retry_wait → ready (再跑)
 任意非终态 → cancelled
 不可恢复或耗尽尝试 → failed （可手动 reopen → ready）
 ```
+
+`waiting_approval`、`cancelled` 和 `failure_class=timeout` 是三件不同的事。审批被拒绝后不会领取租约，不可逆工具调用在产生外部效果之前被拒绝。
 
 非法迁移抛 `IllegalTransitionError`。
 
@@ -67,6 +70,7 @@ running / verifying → retry_wait → ready (再跑)
   3. **finalize+commit**：对照验收条件；fencing token 不匹配则拒绝迟到结果。
 - PostgreSQL claim 使用 `SELECT ... FOR UPDATE SKIP LOCKED`。SQLite 使用 `BEGIN IMMEDIATE` + version/status CAS，作为单 worker fallback，进程被杀掉后已提交的租约仍然在。
 - 过期租约在下次 `run` / `recover` 时回收。无幂等键且未允许自动重试的副作用任务进入 `blocked`，不会自动再跑。
+- `run_queue` 按优先级取就绪任务，并用等待时间做公平提升。`max_concurrency` 只统计未过期的租约。依赖全部成功后，阻塞任务会被唤醒；仍要审批的进入 `waiting_approval`。有环的图会整批拒绝。
 - `retry_wait.next_retry_at` 按尝试次数指数退避。显式 `run <id>` 可以立刻重试；自动捞取会等到到期。
 - 预留 `LeaseManager`、`CapabilityMatcher` 类型。持久锁是数据库租约，不是内存对象。
 
@@ -105,8 +109,9 @@ Inbound webhook（`POST /v1/inbound/webhook`）校验 HMAC，用 `X-Max-Delivery
 
 ## 人工审批策略
 
-- 标签含 `delete|deploy|payment|publish|permission|production|external_write` → 必须先 `approve`。`run --confirm-side-effects` 不能代替这次授权。
-- `has_side_effects=true` 的重试仍需 `--confirm-side-effects`、budget 显式允许、幂等键，或已经 `approve`。
+- 标签含 `delete|deploy|payment|publish|permission|production|external_write` → 状态是 `waiting_approval`，必须先 `approve`。`run --confirm-side-effects` 不能代替这次授权。
+- `approve` 记录审批人、权限范围和可选过期时间。范围盖不住敏感标签时不会放行。`reject` 之后不会执行外部动作。过期是 `approval_expired`，不是 timeout，也不是 cancel。
+- `has_side_effects=true` 的重试仍需 `--confirm-side-effects`、budget 显式允许、幂等键，或已经 `approve`。这种确认仍然进入 `blocked`，不占用审批门状态。
 - **不实现真实支付/部署**；仅策略钩子。mock / local_code / cli（默认 stub）演示不需要生产凭证。真实 Grok Build 或 Codex 仅在 `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` 且版本探测成功后启动。
 
 ## 非目标（MVP）

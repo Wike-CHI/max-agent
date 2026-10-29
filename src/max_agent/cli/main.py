@@ -16,6 +16,7 @@ from max_agent.models.enums import TaskStatus, WorkerKind
 from max_agent.models.schemas import (
     BudgetCeilings,
     BudgetConstraints,
+    GraphNode,
     ScheduleRequest,
     TaskCreate,
     TaskEventRead,
@@ -122,6 +123,7 @@ def create_cmd(
     issue: Optional[str] = typer.Option(None, "--issue", help="Issue id or URL supplied by the caller."),
     side_effects: bool = typer.Option(False, "--side-effects"),
     tag: list[str] = typer.Option([], "--tag", "-t"),
+    depends_on: list[str] = typer.Option([], "--depends-on", help="Task id this task waits for"),
 ) -> None:
     """Create a task and return immediately. Does not run the worker."""
     wp: dict = {}
@@ -150,9 +152,13 @@ def create_cmd(
         has_side_effects=side_effects,
         tags=list(tag),
         issue_ref=issue,
+        dependencies=list(depends_on),
     )
-    with session_scope() as session:
-        task = TaskService(session).create(data)
+    try:
+        with session_scope() as session:
+            task = TaskService(session).create(data)
+    except ValueError as exc:
+        _fail(ctx, "create", str(exc))
     _emit_task(ctx, "create", task)
 
 
@@ -216,6 +222,24 @@ def run_cmd(
     _emit_task(ctx, "run", task, include_events=True)
 
 
+@app.command("run-queue")
+def run_queue_cmd(
+    ctx: typer.Context,
+    limit: int = typer.Option(50, "--limit", "-n", min=1, max=500),
+) -> None:
+    """Run ready tasks until the queue is empty or the limit is reached."""
+    try:
+        tasks = Scheduler().run_queue(max_tasks=limit)
+    except (KeyError, ValueError) as exc:
+        _fail(ctx, "run-queue", str(exc))
+    if _json_mode(ctx):
+        payload = envelope(command="run-queue")
+        payload["tasks"] = [task.model_dump(mode="json") for task in tasks]
+        _echo_json(payload)
+        return
+    _print(tasks)
+
+
 @app.command("recover")
 def recover_cmd(ctx: typer.Context) -> None:
     """Requeue or block tasks whose lease expired. Use after a process restart."""
@@ -244,14 +268,53 @@ def approve_cmd(
     task_id: str,
     by: str = typer.Option("user", "--by", help="Who approved the sensitive action"),
     note: str = typer.Option("", "--note", help="Why this remote write, publish, or payment may proceed"),
+    scope: list[str] = typer.Option([], "--scope", help="Permission scope. Repeat for each tag."),
+    ttl: Optional[int] = typer.Option(None, "--ttl", help="Grant lifetime in seconds"),
 ) -> None:
     """Record explicit approval. Required before publish, payment, or remote write."""
     try:
         with session_scope() as session:
-            task = TaskService(session).approve(task_id, actor=by, note=note)
+            task = TaskService(session).approve(task_id, actor=by, note=note, scope=list(scope), ttl_seconds=ttl)
     except (KeyError, ValueError) as exc:
         _fail(ctx, "approve", str(exc))
     _emit_task(ctx, "approve", task)
+
+
+@app.command("reject")
+def reject_cmd(
+    ctx: typer.Context,
+    task_id: str,
+    by: str = typer.Option("user", "--by", help="Who rejected the sensitive action"),
+    note: str = typer.Option("", "--note", help="Why this action must not run"),
+) -> None:
+    """Reject approval. The worker must not perform the external action."""
+    try:
+        with session_scope() as session:
+            task = TaskService(session).reject(task_id, actor=by, note=note)
+    except (KeyError, ValueError) as exc:
+        _fail(ctx, "reject", str(exc))
+    _emit_task(ctx, "reject", task)
+
+
+@app.command("graph")
+def graph_cmd(ctx: typer.Context, payload: str = typer.Argument(..., help="JSON list of graph nodes")) -> None:
+    """Create a task DAG. Cyclic dependencies are rejected and nothing is stored."""
+    try:
+        raw = json.loads(payload)
+        nodes = [GraphNode.model_validate(item) for item in raw]
+    except (json.JSONDecodeError, ValueError) as exc:
+        _fail(ctx, "graph", str(exc))
+    try:
+        with session_scope() as session:
+            tasks = TaskService(session).create_graph(nodes)
+    except (KeyError, ValueError) as exc:
+        _fail(ctx, "graph", str(exc))
+    if _json_mode(ctx):
+        body = envelope(command="graph")
+        body["tasks"] = [task.model_dump(mode="json") for task in tasks]
+        _echo_json(body)
+        return
+    _print(tasks)
 
 
 @app.command("events")

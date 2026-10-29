@@ -9,14 +9,17 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session, sessionmaker
 
 from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
+from max_agent.kernel.dag import wake_satisfied
 from max_agent.kernel.economics import assess_budget
-from max_agent.kernel.errors import StaleFenceError
+from max_agent.kernel.errors import IrreversibleOpError, StaleFenceError
 from max_agent.kernel.journal import Journal
 from max_agent.kernel.lease import AttemptClaim, select_task_for_finalize
 from max_agent.kernel.mutate import transition_task
+from max_agent.kernel.queue import QueuePolicy, pick_next
 from max_agent.kernel.readmodel import task_to_read
 from max_agent.kernel.retry import backoff_delay_seconds
 from max_agent.kernel.timeutil import as_utc
+from max_agent.policy.boundary import irreversible_refusal, tool_is_irreversible
 from max_agent.kernel.verification import verify
 from max_agent.models.aer import CostReading, usage_from_result
 from max_agent.models.enums import AttemptStatus, EventType, FailureClass, TaskStatus, WorkerKind
@@ -27,22 +30,33 @@ from max_agent.workers.registry import get_worker
 _IN_FLIGHT = frozenset({TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.VERIFYING})
 
 
-def next_ready_id(session: Session, now: datetime, exclude: set[str]) -> str | None:
-    rows = (
-        session.query(TaskRow)
-        .filter(TaskRow.status.in_([TaskStatus.READY.value, TaskStatus.RETRY_WAIT.value]))
-        .order_by(TaskRow.priority.asc(), TaskRow.created_at.asc())
-        .all()
-    )
-    now_utc = as_utc(now)
-    for row in rows:
-        if row.id in exclude:
-            continue
-        nxt = as_utc(row.next_retry_at)
-        if nxt is not None and now_utc is not None and nxt > now_utc:
-            continue
-        return row.id
-    return None
+def next_ready_id(
+    session: Session,
+    now: datetime,
+    exclude: set[str],
+    policy: QueuePolicy | None = None,
+) -> str | None:
+    return pick_next(session, now, exclude, policy).task_id
+
+
+def _refuse_irreversible(session_factory: sessionmaker[Session], task_id: str, name: str, args: dict[str, Any]) -> None:
+    """Stop the tool before any journal row or external effect."""
+    if not tool_is_irreversible(name, args):
+        return
+    session = session_factory()
+    try:
+        row = session.get(TaskRow, task_id)
+        if row is None:
+            raise IrreversibleOpError("task missing")
+        reason = irreversible_refusal(
+            status=row.status,
+            approval_decision=row.approval_decision,
+            cancel_requested_at=row.cancel_requested_at,
+        )
+        if reason:
+            raise IrreversibleOpError(reason)
+    finally:
+        session.close()
 
 
 def execute_claim(
@@ -56,6 +70,7 @@ def execute_claim(
     tool_calls: list[dict[str, Any]] = []
 
     def on_tool(name: str, args: dict[str, Any]) -> None:
+        _refuse_irreversible(session_factory, claim.task_id, name, args)
         tool_calls.append({"tool": name, "args": args})
         _journal_tool(session_factory, claim, name, args)
 
@@ -237,6 +252,7 @@ def finalize_in_session(
             },
             journal=journal,
         )
+        wake_satisfied(session, now=now)
         _note_budget(session, row, journal)
         return task_to_read(row)
 
