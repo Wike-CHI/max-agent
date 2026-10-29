@@ -10,16 +10,32 @@ from pydantic import BaseModel, Field, field_validator
 from max_agent.models.enums import EventType, TaskStatus, WorkerKind
 
 
+class BudgetCeilings(BaseModel):
+    """Per-ledger caps. None means that ledger has no ceiling.
+
+    `0` is a real cap. It is not a stand-in for missing data.
+    """
+
+    grok_bot_quota: float | None = Field(default=None, ge=0)
+    cli_quota: float | None = Field(default=None, ge=0)
+    api_spend: float | None = Field(default=None, ge=0)
+
+
 class BudgetConstraints(BaseModel):
-    """Soft budget limits; enforcement is policy-level in MVP."""
+    """Budget limits. `max_cost_units == 0` means the aggregate cap is unset."""
 
     max_attempts: int = Field(default=3, ge=1, le=100)
     timeout_seconds: int = Field(default=300, ge=1, le=86400)
-    max_cost_units: float = Field(default=0.0, ge=0.0)
+    max_cost_units: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Aggregate cap across ledgers. 0 means unset, preserving older tasks.",
+    )
     allow_auto_retry_side_effects: bool = Field(
         default=False,
         description="If true, tasks marked has_side_effects may auto-retry without confirmation.",
     )
+    ceilings: BudgetCeilings = Field(default_factory=BudgetCeilings)
 
 
 class TaskCreate(BaseModel):
@@ -34,6 +50,11 @@ class TaskCreate(BaseModel):
     worker_payload: dict[str, Any] = Field(default_factory=dict)
     has_side_effects: bool = False
     tags: list[str] = Field(default_factory=list)
+    issue_ref: str | None = Field(
+        default=None,
+        max_length=256,
+        description="Caller-supplied issue id or URL. Never inferred from the goal text.",
+    )
 
     @field_validator("acceptance_criteria")
     @classmethod
@@ -69,6 +90,7 @@ class TaskRead(BaseModel):
     approved_at: datetime | None = None
     approved_by: str | None = None
     approval_note: str | None = None
+    issue_ref: str | None = None
     idempotent_replay: bool = Field(
         default=False,
         exclude=True,
@@ -113,6 +135,19 @@ class ScheduleRequest(BaseModel):
     force: bool = False
 
 
+class UsageReport(BaseModel):
+    """Usage the worker actually observed. Omit fields that were not reported."""
+
+    source: str | None = None
+    marker: str | None = None
+    amount: float | None = None
+    currency: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model: str | None = None
+    provider: str | None = None
+
+
 class WorkerResult(BaseModel):
     """Unified worker completion report (done ≠ success)."""
 
@@ -122,6 +157,7 @@ class WorkerResult(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     recoverable: bool = True
     error: str | None = None
+    usage: UsageReport | None = None
 
 
 class VerificationResult(BaseModel):

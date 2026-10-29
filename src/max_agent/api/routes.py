@@ -11,6 +11,7 @@ from max_agent.entry.contract import envelope
 from max_agent.entry.webhook import WebhookError, accept_inbound, verify_signature
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
+from max_agent.models.aer import EconomicsReport, ExportRetryResult, TaskTrace
 from max_agent.models.enums import TaskStatus
 from max_agent.models.schemas import (
     ApproveRequest,
@@ -128,6 +129,28 @@ async def inbound_webhook(request: Request) -> dict:
             return accept_inbound(session, delivery_id=delivery_id, body=raw, event=event)
     except WebhookError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.get("/tasks/{task_id}/trace", response_model=TaskTrace)
+def task_trace(task_id: str) -> TaskTrace:
+    try:
+        with session_scope() as session:
+            return TaskService(session).trace(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/metrics", response_model=EconomicsReport)
+def metrics() -> EconomicsReport:
+    with session_scope() as session:
+        return TaskService(session).metrics()
+
+
+@router.post("/aer/retry", response_model=ExportRetryResult)
+def retry_aer_exports() -> ExportRetryResult:
+    """Redeliver pending and failed AER rows. Does not run tasks."""
+    with session_scope() as session:
+        return TaskService(session).retry_aer_exports()
 
 
 @router.get("/tasks/{task_id}/events", response_model=list[TaskEventRead])

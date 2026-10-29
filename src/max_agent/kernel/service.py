@@ -8,11 +8,19 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from max_agent.db.models import TaskRow, utcnow
+from max_agent.kernel.economics import build_trace, compute_metrics
 from max_agent.kernel.errors import LeaseHeldError
 from max_agent.kernel.journal import Journal
 from max_agent.kernel.mutate import cas_update, transition_task
 from max_agent.kernel.readmodel import task_to_read
 from max_agent.kernel.state_machine import TERMINAL
+from max_agent.models.aer import (
+    EconomicsReport,
+    ExportRetryResult,
+    TaskTrace,
+    ceilings_payload,
+    explicit_issue_ref,
+)
 from max_agent.models.enums import EventType, TaskStatus, WorkerKind
 from max_agent.models.schemas import (
     ScheduleRequest,
@@ -42,6 +50,15 @@ class TaskService:
         if status is not None:
             q = q.filter(TaskRow.status == status.value)
         return [self._to_read(r) for r in q.limit(limit).all()]
+
+    def trace(self, task_id: str) -> TaskTrace:
+        return build_trace(self.session, self._get_row(task_id))
+
+    def metrics(self) -> EconomicsReport:
+        return compute_metrics(self.session)
+
+    def retry_aer_exports(self) -> ExportRetryResult:
+        return self.journal.retry_exports()
 
     def list_events(self, task_id: str, *, limit: int = 200) -> list[TaskEventRead]:
         self._get_row(task_id)  # ensure exists
@@ -81,6 +98,7 @@ class TaskService:
 
         budget = data.budget
         timeout = data.timeout_seconds if data.timeout_seconds is not None else budget.timeout_seconds
+        issue_ref = explicit_issue_ref(data.issue_ref, data.tags)
         task_id = str(uuid.uuid4())
         initial = TaskStatus.PENDING
         # if deps present → blocked until deps succeed
@@ -99,6 +117,8 @@ class TaskService:
             timeout_seconds=timeout,
             max_cost_units=budget.max_cost_units,
             allow_auto_retry_side_effects=budget.allow_auto_retry_side_effects,
+            issue_ref=issue_ref,
+            budget_ceilings=ceilings_payload(budget.ceilings),
             idempotency_key=data.idempotency_key,
             worker_kind=data.worker_kind.value,
             worker_payload=dict(data.worker_payload),
@@ -114,7 +134,13 @@ class TaskService:
             task_id,
             EventType.CREATED,
             f"task created status={initial.value}",
-            {"goal": data.goal, "worker_kind": data.worker_kind.value},
+            {
+                "goal": data.goal,
+                "worker_kind": data.worker_kind.value,
+                "issue_ref": issue_ref,
+                "budget_ceilings": ceilings_payload(budget.ceilings),
+                "max_cost_units": budget.max_cost_units,
+            },
         )
 
         if initial == TaskStatus.PENDING and not data.dependencies:

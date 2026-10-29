@@ -4,15 +4,27 @@ from __future__ import annotations
 
 from max_agent.db.models import TaskRow
 from max_agent.models.enums import TaskStatus, WorkerKind
-from max_agent.models.schemas import BudgetConstraints, TaskRead
+from max_agent.models.aer import COST_SOURCES
+from max_agent.models.schemas import BudgetCeilings, BudgetConstraints, TaskRead
+
+
+def _ceiling(raw: dict, source: str) -> float | None:
+    if source not in raw or raw.get(source) is None:
+        return None
+    value = raw.get(source)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def task_to_read(row: TaskRow) -> TaskRead:
+    raw_ceilings = dict(row.budget_ceilings or {})
     budget = BudgetConstraints(
         max_attempts=row.max_attempts,
         timeout_seconds=row.timeout_seconds,
         max_cost_units=row.max_cost_units,
         allow_auto_retry_side_effects=row.allow_auto_retry_side_effects,
+        ceilings=BudgetCeilings(**{source: _ceiling(raw_ceilings, source) for source in COST_SOURCES}),
     )
     return TaskRead(
         id=row.id,
@@ -42,4 +54,5 @@ def task_to_read(row: TaskRow) -> TaskRead:
         approved_at=row.approved_at,
         approved_by=row.approved_by,
         approval_note=row.approval_note,
+        issue_ref=row.issue_ref,
     )

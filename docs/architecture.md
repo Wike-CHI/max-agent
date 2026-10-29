@@ -16,7 +16,7 @@ MAX-Agent 是可独立部署的任务内核；Grok Bot 作为自然语言入口�
 │  - Scheduler     单 Worker；预留租约/能力匹配 │
 │  - StateMachine  合法状态迁移                │
 │  - Verification  done ≠ success              │
-│  - Journal       执行事件流；预留 AER 适配   │
+│  - Journal       执行事件流 + AER outbox      │
 ├─────────────────────────────────────────────┤
 │  Workers (可替换)                            │
 │  - MockWorker                                │
@@ -83,8 +83,19 @@ Worker 返回 `WorkerResult.ok` 只表示执行完成；内核对照 `acceptance
 
 ## Journal / AER
 
-`task_events` 表持久化 `created` / `status_changed` / `attempt_*` / `tool_call` / `verification` / `error` 等。  
-`AERAdapter` Protocol + `NullAERAdapter` 预留导出。
+`task_events` 仍是执行日志。每条事件在同一事务里写入 `aer_exports` outbox，契约版本 `aer.v1`，`kind` 为 `task_run` / `attempt` / `event` / `verification`。
+
+适配器在事务内投递。失败只把该行标成 `failed` 并记下 `last_error`，不回滚 Task、租约或验收。`max-agent aer-retry` 与 `POST /v1/aer/retry` 重投 `pending` / `failed`。默认 `NullAERAdapter` 只保留 outbox。设置 `MAX_AGENT_AER_DIR` 时，`FileAERAdapter` 按 `event_id` 覆盖写入 JSON，重试不会多出一份文件。
+
+`GET /v1/tasks/{id}/trace` 用同一个 `task_id` 串起 issue、worker、verification、pull request。调用方没提供的环节标记为 `unknown`，不会从目标文本里猜。
+
+## 成本与预算
+
+Worker 报告 `usage.source`（`grok_bot_quota` / `cli_quota` / `api_spend`）和 `usage.marker`（`measured` / `estimate`）。没有 marker 的数字会被丢掉。运行时只有在 attempt 的起止时间都存在时记为 `measured`。
+
+`max_cost_units == 0` 表示没有总上限。`budget.ceilings` 按账本单独设上限，`0` 是真实上限。已测花费超过上限时，下一次 claim 不会拿到租约，fencing token 不变。花费未知时不拦截，预算状态为 `unknown`。审批门仍先于预算检查。
+
+指标 `verified_task_rate`、`cost_per_verified_task`、`retry_overhead` 在缺数时返回 `marker=unknown` 且 `value=null`。只有当已验证任务的每一次 attempt 都是 measured、并且都写明了账本时，才会把花费拆开；这时没被用到的账本合计是 0。否则该账本是 `unknown`，不会用 0 填上。
 
 ## Grok 入口
 
@@ -103,3 +114,8 @@ Inbound webhook（`POST /v1/inbound/webhook`）校验 HMAC，用 `X-Max-Delivery
 - 不复刻 Grok Bot 聊天 / Computer Use / 多 Bot 团队
 - 不依赖未文档化的宿主 SDK / 长驻服务
 - 无 Web UI；无付费 API；无远程 push
+- 无 Task DAG / 公平队列 / `WAITING_APPROVAL`（那是 Issue #7）
+
+## 回滚
+
+`alembic downgrade c4a91e0b7d55` 会删除 `aer_exports` 以及任务上的 `issue_ref` / `budget_ceilings`、attempt 上的成本列。已导出到 `MAX_AGENT_AER_DIR` 的 JSON 是本地文件，删除该目录即可。这个变更不调用外部付费 API，也没有生产部署。

@@ -68,6 +68,24 @@ class EventType(StrEnum):
     RECOVERED = "recovered"
     FENCING_REJECTED = "fencing_rejected"
     INTERRUPTED = "interrupted"
+    BUDGET_EXCEEDED = "budget_exceeded"
+
+
+class CostSource(StrEnum):
+    """Separate ledgers. Do not collapse these into one invented total."""
+
+    GROK_BOT_QUOTA = "grok_bot_quota"
+    CLI_QUOTA = "cli_quota"
+    API_SPEND = "api_spend"
+    UNKNOWN = "unknown"
+
+
+class UsageMarker(StrEnum):
+    """How a number was obtained. Missing data stays unknown."""
+
+    MEASURED = "measured"
+    ESTIMATE = "estimate"
+    UNKNOWN = "unknown"
 
 
 class WorkerKind(StrEnum):
