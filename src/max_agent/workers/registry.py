@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from max_agent.models.enums import WorkerKind
 from max_agent.workers.base import Worker
+from max_agent.workers.cli_adapter import CliWorker
 from max_agent.workers.local_code import LocalCodeWorker
 from max_agent.workers.mock import MockWorker
 
 _REGISTRY: dict[WorkerKind, type[Worker]] = {
     WorkerKind.MOCK: MockWorker,
     WorkerKind.LOCAL_CODE: LocalCodeWorker,
+    WorkerKind.CLI: CliWorker,
 }
 
 

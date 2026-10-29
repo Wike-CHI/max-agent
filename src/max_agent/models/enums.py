@@ -73,3 +73,4 @@ class EventType(StrEnum):
 class WorkerKind(StrEnum):
     MOCK = "mock"
     LOCAL_CODE = "local_code"
+    CLI = "cli"
