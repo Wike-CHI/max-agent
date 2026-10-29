@@ -33,6 +33,8 @@ Grok Bot already provides chat, a cloud computer, terminal, and app automation. 
 | **v0.3 — Durable execution** | Kill a Worker, recover its leased Task without duplicate external effects | #3 | concurrency / expiry / crash-recovery integration tests; clear idempotency policy |
 | **v0.4 — Real coding Worker** | Independently authorized CLI Worker makes a change inside an isolated worktree, verified by tests | #4 | no secret exposure, timeout/cancel respected, artifacts archived |
 | **v0.5 — Orchestration + Economics** | Task DAG, approval gate, AER traces, measurable cost per verified task | #6, #7 | trace across issue/task/attempt/pr; budget policy and DAG recovery tests |
+
+Issue #6 covers the economics half: versioned AER records, retryable export, and cost metrics. Task DAG, fair queue, and `WAITING_APPROVAL` stay in #7.
 | **v1.0 — Portable runtime** | Versioned, restorable deployment with Postgres and staged release | #8 | rollback/recovery drill, documented SLO and operational runbook |
 
 ## Iteration principles

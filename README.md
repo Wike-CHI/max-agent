@@ -45,7 +45,15 @@ uv run max-agent recover
 # Inspect
 uv run max-agent get <TASK_ID>
 uv run max-agent events <TASK_ID>
+uv run max-agent trace <TASK_ID>
+uv run max-agent metrics
+uv run max-agent aer-retry
 uv run max-agent list
+
+# Optional cost ceiling and issue ref. 0 aggregate cost means "unset".
+# --ceiling source is grok_bot_quota, cli_quota, or api_spend.
+uv run max-agent create "echo hello" -c worker_ok --issue Wike-CHI/max-agent#6 \
+  --max-cost 1 --ceiling api_spend=0.5
 
 # Local code worker (writes under /tmp + pytest)
 uv run max-agent create "write adder" \
@@ -96,6 +104,9 @@ uv run max-agent serve --host 127.0.0.1 --port 8080
 # POST /v1/tasks/{id}/cancel
 # POST /v1/tasks/{id}/approve         # {"actor":"user","note":"..."}
 # GET  /v1/tasks/{id}/events
+# GET  /v1/tasks/{id}/trace           # issue -> worker -> verification -> pull request
+# GET  /v1/metrics                     # verified_task_rate, cost_per_verified_task, retry_overhead
+# POST /v1/aer/retry                   # redeliver failed AER exports; does not run tasks
 # POST /v1/inbound/webhook            # signed Routine/webhook create; returns task_id
 ```
 
