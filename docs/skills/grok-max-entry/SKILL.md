@@ -18,7 +18,7 @@ max-agent --json create "<goal>" \
   -k "<idempotency-key>"
 ```
 
-`create` returns `task_id` immediately. `status` is still `ready` (or `blocked` when approval is required). `task.attempts` is `0`. That call did not run the worker.
+`create` returns `task_id` immediately. `status` is still `ready` (or `waiting_approval` when approval is required). `task.attempts` is `0`. That call did not run the worker.
 
 Later, read once:
 
@@ -38,7 +38,7 @@ Without `--json`, `create` still prints the task object with `id` for older scri
 
 ## Approval
 
-Tags `delete`, `deploy`, `payment`, `publish`, `permission`, `production`, and `external_write` create the task as `blocked` with `approval_required: true`.
+Tags `delete`, `deploy`, `payment`, `publish`, `permission`, `production`, and `external_write` create the task as `waiting_approval` with `approval_required: true`.
 
 `run --confirm-side-effects` does not clear that gate. Ask the user, then:
 
@@ -54,7 +54,7 @@ A side-effect retry that is not in that tag set still needs `--confirm-side-effe
 
 `max-agent mcp` speaks newline-delimited JSON-RPC on stdin/stdout. Methods: `initialize`, `tools/list`, `tools/call`. Notifications are ignored.
 
-Tools: `max_create`, `max_status`, `max_events`, `max_cancel`, `max_approve`. Each call does one kernel operation and returns the same envelope as text. The server does not poll.
+Tools: `max_create`, `max_status`, `max_events`, `max_cancel`, `max_approve`, `max_reject`. Each call does one kernel operation and returns the same envelope as text. The server does not poll.
 
 This is not a full MCP host. It has no resources or prompts.
 

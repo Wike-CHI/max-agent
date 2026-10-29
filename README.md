@@ -87,7 +87,7 @@ uv run max-agent --json status <TASK_ID>
 uv run max-agent --json events <TASK_ID>
 uv run max-agent --json cancel <TASK_ID>
 
-# publish / payment / external_write stay blocked until this returns
+# publish / payment / external_write stay waiting_approval until this returns
 uv run max-agent --json approve <TASK_ID> --by "user" --note "ok"
 ```
 
@@ -108,7 +108,10 @@ uv run max-agent serve --host 127.0.0.1 --port 8080
 # GET  /v1/tasks/{id}/status          # same envelope as `max-agent --json status`
 # POST /v1/tasks/{id}/schedule
 # POST /v1/tasks/{id}/cancel
-# POST /v1/tasks/{id}/approve         # {"actor":"user","note":"..."}
+# POST /v1/tasks/graph                # {"nodes":[{"key":"a","goal":"...","depends_on":[]}]}
+# POST /v1/queue/run?limit=50
+# POST /v1/tasks/{id}/approve         # {"actor":"user","note":"...","scope":[],"ttl_seconds":null}
+# POST /v1/tasks/{id}/reject          # {"actor":"user","note":"..."}
 # GET  /v1/tasks/{id}/events
 # GET  /v1/tasks/{id}/trace           # issue -> worker -> verification -> pull request
 # GET  /v1/metrics                     # verified_task_rate, cost_per_verified_task, retry_overhead
