@@ -154,6 +154,7 @@ def recover_inflight(
         confirm_side_effects=confirm_side_effects,
         allow_auto_retry_side_effects=bool(row.allow_auto_retry_side_effects),
         idempotency_key=row.idempotency_key,
+        approval_granted=row.approved_at is not None,
     )
     if int(row.attempts) >= int(row.max_attempts):
         target = TaskStatus.FAILED
@@ -294,6 +295,7 @@ def claim_in_session(
         confirm_side_effects=req.confirm_side_effects,
         allow_auto_retry_side_effects=bool(row.allow_auto_retry_side_effects),
         idempotency_key=row.idempotency_key,
+        approval_granted=row.approved_at is not None,
     )
     journal = Journal(session)
     if need:

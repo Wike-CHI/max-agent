@@ -57,6 +57,33 @@ uv run max-agent create "write adder" \
 uv run max-agent run <TASK_ID> --confirm-side-effects
 ```
 
+## Grok Bot entry
+
+Grok is the caller. MAX keeps the task. The bot creates a task, stores `task_id`, and reads status later. It does not sit in a poll loop, and it does not decide success.
+
+Machine callers pass `--json` before the subcommand. The envelope always has the same keys (`ok`, `command`, `task_id`, `status`, `approval_required`, `approved`, `verification`, `events`, ...).
+
+```bash
+uv run max-agent --json create "echo hello" \
+  -c worker_ok -c 'output_equals:answer=hello' \
+  -w mock --payload '{"mode":"success","answer":"hello"}' \
+  -k grok-1
+
+uv run max-agent --json status <TASK_ID>
+uv run max-agent --json events <TASK_ID>
+uv run max-agent --json cancel <TASK_ID>
+
+# publish / payment / external_write stay blocked until this returns
+uv run max-agent --json approve <TASK_ID> --by "user" --note "ok"
+```
+
+`run` is the worker process (one attempt). A local mock or `local_code` task does not need production credentials. Instructions for a Grok Bot: [docs/skills/grok-max-entry/SKILL.md](docs/skills/grok-max-entry/SKILL.md).
+
+```bash
+uv run python scripts/grok_entry_demo.py
+uv run max-agent mcp   # stdio JSON-RPC: initialize, tools/list, tools/call
+```
+
 ## HTTP API
 
 ```bash
@@ -64,10 +91,15 @@ uv run max-agent serve --host 127.0.0.1 --port 8080
 # GET  /v1/health
 # POST /v1/tasks
 # GET  /v1/tasks/{id}
+# GET  /v1/tasks/{id}/status          # same envelope as `max-agent --json status`
 # POST /v1/tasks/{id}/schedule
 # POST /v1/tasks/{id}/cancel
+# POST /v1/tasks/{id}/approve         # {"actor":"user","note":"..."}
 # GET  /v1/tasks/{id}/events
+# POST /v1/inbound/webhook            # signed Routine/webhook create; returns task_id
 ```
+
+Webhook requests need `MAX_AGENT_WEBHOOK_SECRET` plus headers `X-Max-Timestamp`, `X-Max-Signature` (hex HMAC-SHA256 of `{timestamp}.{raw_body}`), and `X-Max-Delivery-Id`. Replays of the same delivery id return the original task. A new delivery with the same `idempotency_key` attaches to that task and does not start a second one. The handler does not run the worker.
 
 ## Tests
 

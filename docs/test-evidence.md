@@ -46,3 +46,44 @@ uv run max-agent run <TASK_ID>
 uv run max-agent events <TASK_ID>
 bash scripts/acceptance_demo.sh
 ```
+
+## Issue #5 Grok entry (2026-10-29)
+
+Local commands on Python 3.12.3 / uv 0.13.6:
+
+```bash
+uv sync --locked --extra dev
+uv run --no-sync pytest -q
+uv build
+uv run --no-sync python scripts/grok_entry_demo.py
+```
+
+`pytest -q`: 40 passed on CPython 3.12.3 and again on 3.13.18. One pre-existing Starlette/`httpx` warning.
+
+`uv build`: `dist/max_agent-0.1.0.tar.gz` and `dist/max_agent-0.1.0-py3-none-any.whl`.
+
+Demo (`caller_poll_loops` is 0). The bot called `create`, then one worker `run`, then one `status`. Publish stayed blocked until `approve`. Webhook replay was deduplicated and a second delivery id hit the same task.
+
+```json
+{
+  "caller_poll_loops": 0,
+  "create": {"status": "ready", "attempts": 0},
+  "worker_run_status": "succeeded",
+  "status_once": {
+    "status": "succeeded",
+    "verification": {"passed": true}
+  },
+  "approval": {
+    "before": "blocked",
+    "run_without_approve": "blocked",
+    "after_approve": "ready",
+    "after_approved_run": "succeeded"
+  },
+  "webhook": {
+    "replay_deduplicated": true,
+    "same_task": true,
+    "associated_idempotent_hit": true,
+    "associated_same_task": true
+  }
+}
+```

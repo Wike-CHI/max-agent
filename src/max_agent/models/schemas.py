@@ -66,6 +66,14 @@ class TaskRead(BaseModel):
     fencing_token: int = 0
     next_retry_at: datetime | None = None
     failure_class: str | None = None
+    approved_at: datetime | None = None
+    approved_by: str | None = None
+    approval_note: str | None = None
+    idempotent_replay: bool = Field(
+        default=False,
+        exclude=True,
+        description="Set on the create response when an idempotency key hit an existing task.",
+    )
 
     model_config = {"from_attributes": True}
 
@@ -79,6 +87,24 @@ class TaskEventRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ApproveRequest(BaseModel):
+    actor: str = Field(default="user", max_length=128)
+    note: str = Field(default="", max_length=2000)
+
+
+class InboundEvent(BaseModel):
+    """Routine / webhook body. Associated to a task by idempotency_key."""
+
+    idempotency_key: str = Field(..., min_length=1, max_length=128)
+    goal: str = Field(..., min_length=1, max_length=4000)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    worker_kind: WorkerKind = WorkerKind.MOCK
+    worker_payload: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    has_side_effects: bool = False
+    priority: int = Field(default=100, ge=0, le=1000)
 
 
 class ScheduleRequest(BaseModel):
