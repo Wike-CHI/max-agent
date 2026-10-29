@@ -79,6 +79,13 @@ uv run pytest -q
 - `docs/limitations.md` — known limits + next phase
 - `docs/test-evidence.md` — captured pytest / demo output
 
+## GitHub delivery workflow
+
+- [Product roadmap](docs/ROADMAP.md): v0.1 MVP → Grok entry → durable execution → real workers → cost and orchestration.
+- [Contribution / Issue–PR protocol](CONTRIBUTING.md): Issue → branch → PR → CI → squash merge → reviewed version tag.
+- [CI workflow](.github/workflows/ci.yml): issue-link, Python 3.12/3.13 tests, CLI startup and package build.
+- [Release workflow](.github/workflows/release.yml): manually tagged versions get tested and packaged as GitHub Releases. Production deploy remains manual.
+
 ## Safety
 
-Local git only. No remote push, paid APIs, or external side effects without explicit authorization.
+Remote changes, paid APIs, and external side effects require authorization. The repository is currently private; GitHub branch protection may require an upgraded plan, so human review and CI confirmation remain mandatory.
