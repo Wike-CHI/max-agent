@@ -8,8 +8,8 @@ MAX-Agent 是可独立部署的任务内核；Grok Bot 作为自然语言入口�
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Adapters: CLI (Typer) / HTTP (FastAPI) /   │
-│            (future) MCP                     │
+│  Adapters: CLI (Typer, --json) / HTTP       │
+│            stdio MCP tools / signed webhook │
 ├─────────────────────────────────────────────┤
 │  Kernel                                      │
 │  - TaskService   唯一状态写入路径            │
@@ -85,11 +85,17 @@ Worker 返回 `WorkerResult.ok` 只表示执行完成；内核对照 `acceptance
 `task_events` 表持久化 `created` / `status_changed` / `attempt_*` / `tool_call` / `verification` / `error` 等。  
 `AERAdapter` Protocol + `NullAERAdapter` 预留导出。
 
+## Grok 入口
+
+Grok Bot 只做一次性调用：`create` 立刻返回 `task_id`，之后按需 `status` / `events`。Worker 的 `run` 是单独进程，不由对话循环轮询。稳定字段见 `max_agent.entry.contract.envelope`。Skill 说明在 `docs/skills/grok-max-entry/SKILL.md`。stdio MCP 只实现 `initialize`、`tools/list`、`tools/call`。
+
+Inbound webhook（`POST /v1/inbound/webhook`）校验 HMAC，用 `X-Max-Delivery-Id` 去重，并用 body 里的 `idempotency_key` 关联到已有任务。它只创建任务，不执行。
+
 ## 人工审批策略
 
-- 标签含 `delete|deploy|payment|publish|permission|production|external_write` → 需 `--confirm-side-effects`。
-- `has_side_effects=true` 的任务自动重试需确认（或 budget 显式允许）。
-- **不实现真实支付/部署**；仅策略钩子。
+- 标签含 `delete|deploy|payment|publish|permission|production|external_write` → 必须先 `approve`。`run --confirm-side-effects` 不能代替这次授权。
+- `has_side_effects=true` 的重试仍需 `--confirm-side-effects`、budget 显式允许、幂等键，或已经 `approve`。
+- **不实现真实支付/部署**；仅策略钩子。mock / local_code 演示不需要生产凭证。
 
 ## 非目标（MVP）
 

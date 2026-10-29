@@ -46,7 +46,7 @@ Grok Bot already provides chat, a cloud computer, terminal, and app automation. 
 
 ## Planned architecture boundary
 
-- **Entry:** Grok Bot Skill / CLI adapter; later MCP or HTTP integration.
+- **Entry:** Grok Bot calls the CLI `--json` contract or the minimal stdio MCP tools (`docs/skills/grok-max-entry/SKILL.md`). HTTP status/approve and the signed inbound webhook are the same kernel. No chat UI.
 - **Control:** TaskService, Scheduler, DAG, approval/policy, Worker capability registry.
 - **Execution:** replaceable Workers (Mock/LocalCode first; real CLI after sandbox work).
 - **Evidence:** Journal, Verification, AER export, trace/cost telemetry.
