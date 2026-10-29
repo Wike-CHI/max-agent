@@ -10,6 +10,28 @@ from max_agent.models.schemas import WorkerResult
 from max_agent.workers.base import Worker, WorkerContext
 
 
+_STUB_KEYS = (
+    "usage",
+    "model",
+    "provider",
+    "pr_url",
+    "pull_request",
+    "evidence_url",
+    "artifact",
+    "issue_ref",
+    "issue_url",
+)
+
+
+def _with_stubbed_report(ctx: WorkerContext, outputs: dict[str, Any]) -> dict[str, Any]:
+    """Copy caller-supplied usage and evidence fields onto every mock mode."""
+    merged = dict(outputs)
+    for key in _STUB_KEYS:
+        if key in ctx.payload and key not in merged:
+            merged[key] = ctx.payload[key]
+    return merged
+
+
 class MockWorker(Worker):
     kind = WorkerKind.MOCK
 
@@ -25,7 +47,7 @@ class MockWorker(Worker):
             return WorkerResult(
                 ok=True,
                 summary="mock sleep finished",
-                outputs={"mode": mode, "answer": "slept"},
+                outputs=_with_stubbed_report(ctx, {"mode": mode, "answer": "slept"}),
                 recoverable=True,
             )
         if delay > 0:
@@ -38,7 +60,7 @@ class MockWorker(Worker):
             return WorkerResult(
                 ok=False,
                 summary="mock recoverable failure",
-                outputs={"mode": mode},
+                outputs=_with_stubbed_report(ctx, {"mode": mode}),
                 tool_calls=[{"tool": "mock.echo", "args": {"mode": mode}}],
                 recoverable=True,
                 error="simulated transient error",
@@ -48,7 +70,7 @@ class MockWorker(Worker):
             return WorkerResult(
                 ok=False,
                 summary="mock hard failure",
-                outputs={"mode": mode},
+                outputs=_with_stubbed_report(ctx, {"mode": mode}),
                 tool_calls=[{"tool": "mock.echo", "args": {"mode": mode}}],
                 recoverable=False,
                 error="simulated permanent error",
@@ -59,7 +81,7 @@ class MockWorker(Worker):
             return WorkerResult(
                 ok=True,
                 summary="mock said done but wrong output",
-                outputs={"mode": mode, "answer": "wrong"},
+                outputs=_with_stubbed_report(ctx, {"mode": mode, "answer": "wrong"}),
                 tool_calls=[{"tool": "mock.echo", "args": {"mode": mode}}],
                 recoverable=True,
             )

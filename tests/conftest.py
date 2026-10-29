@@ -8,6 +8,15 @@ import pytest
 from max_agent.db.session import init_db, reset_engine, session_scope
 
 
+@pytest.fixture(autouse=True)
+def _reset_aer_adapter():
+    from max_agent.kernel.aer import set_aer_adapter
+
+    set_aer_adapter(None)
+    yield
+    set_aer_adapter(None)
+
+
 @pytest.fixture()
 def db_url(tmp_path: Path) -> str:
     path = tmp_path / "test.db"

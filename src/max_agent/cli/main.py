@@ -13,7 +13,16 @@ from max_agent.entry.contract import envelope
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
 from max_agent.models.enums import TaskStatus, WorkerKind
-from max_agent.models.schemas import BudgetConstraints, ScheduleRequest, TaskCreate, TaskEventRead, TaskRead
+from max_agent.models.schemas import (
+    BudgetCeilings,
+    BudgetConstraints,
+    ScheduleRequest,
+    TaskCreate,
+    TaskEventRead,
+    TaskRead,
+)
+
+_COST_SOURCES = ("grok_bot_quota", "cli_quota", "api_spend")
 
 app = typer.Typer(name="max-agent", help="MAX-Agent task scheduler kernel CLI", no_args_is_help=True)
 
@@ -103,6 +112,13 @@ def create_cmd(
     idempotency_key: Optional[str] = typer.Option(None, "--idempotency-key", "-k"),
     max_attempts: int = typer.Option(3, "--max-attempts"),
     timeout: int = typer.Option(300, "--timeout"),
+    max_cost: float = typer.Option(0.0, "--max-cost", help="Aggregate cost ceiling. 0 means unset."),
+    ceiling: list[str] = typer.Option(
+        [],
+        "--ceiling",
+        help="Per-ledger ceiling source=amount. source: grok_bot_quota, cli_quota, api_spend.",
+    ),
+    issue: Optional[str] = typer.Option(None, "--issue", help="Issue id or URL supplied by the caller."),
     side_effects: bool = typer.Option(False, "--side-effects"),
     tag: list[str] = typer.Option([], "--tag", "-t"),
 ) -> None:
@@ -113,6 +129,10 @@ def create_cmd(
             wp = json.loads(payload)
         except json.JSONDecodeError as exc:
             _fail(ctx, "create", f"invalid payload json: {exc}")
+    try:
+        ceilings = _parse_ceilings(list(ceiling))
+    except ValueError as exc:
+        _fail(ctx, "create", str(exc))
     data = TaskCreate(
         goal=goal,
         acceptance_criteria=list(criterion),
@@ -120,9 +140,15 @@ def create_cmd(
         worker_kind=WorkerKind(worker.value),
         worker_payload=wp,
         idempotency_key=idempotency_key,
-        budget=BudgetConstraints(max_attempts=max_attempts, timeout_seconds=timeout),
+        budget=BudgetConstraints(
+            max_attempts=max_attempts,
+            timeout_seconds=timeout,
+            max_cost_units=max_cost,
+            ceilings=ceilings,
+        ),
         has_side_effects=side_effects,
         tags=list(tag),
+        issue_ref=issue,
     )
     with session_scope() as session:
         task = TaskService(session).create(data)
@@ -254,6 +280,52 @@ def reopen_cmd(ctx: typer.Context, task_id: str) -> None:
     except (KeyError, ValueError) as exc:
         _fail(ctx, "reopen", str(exc))
     _emit_task(ctx, "reopen", task)
+
+
+def _parse_ceilings(items: list[str]) -> BudgetCeilings:
+    data: dict[str, float] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"ceiling must be source=amount, got {item}")
+        source, raw = item.split("=", 1)
+        source = source.strip()
+        if source not in _COST_SOURCES:
+            raise ValueError(f"unknown cost source {source}")
+        try:
+            amount = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"invalid ceiling amount for {source}") from exc
+        if amount < 0:
+            raise ValueError(f"ceiling for {source} cannot be negative")
+        data[source] = amount
+    return BudgetCeilings(**data)
+
+
+@app.command("trace")
+def trace_cmd(ctx: typer.Context, task_id: str) -> None:
+    """Evidence chain for one task: issue, worker, verification, pull request."""
+    try:
+        with session_scope() as session:
+            trace = TaskService(session).trace(task_id)
+    except KeyError as exc:
+        _fail(ctx, "trace", str(exc))
+    _print(trace)
+
+
+@app.command("metrics")
+def metrics_cmd(ctx: typer.Context) -> None:
+    """verified_task_rate, cost_per_verified_task, and retry_overhead."""
+    with session_scope() as session:
+        report = TaskService(session).metrics()
+    _print(report)
+
+
+@app.command("aer-retry")
+def aer_retry_cmd(ctx: typer.Context) -> None:
+    """Redeliver failed or pending AER exports. Does not run tasks."""
+    with session_scope() as session:
+        result = TaskService(session).retry_aer_exports()
+    _print(result)
 
 
 @app.command("serve")

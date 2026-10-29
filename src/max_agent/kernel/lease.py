@@ -18,9 +18,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
+from max_agent.kernel.economics import assess_budget
 from max_agent.kernel.errors import LeaseHeldError
 from max_agent.kernel.journal import Journal
-from max_agent.kernel.mutate import transition_task
+from max_agent.kernel.mutate import cas_update, transition_task
 from max_agent.kernel.readmodel import task_to_read
 from max_agent.kernel.retry import backoff_delay_seconds
 from max_agent.kernel.timeutil import as_utc
@@ -336,6 +337,14 @@ def claim_in_session(
             )
         return task_to_read(row)
 
+    assessment = assess_budget(session, row)
+    if assessment.status == "exceeded":
+        reason = assessment.reason[:2000] or "budget ceiling exceeded"
+        if not cas_update(session, row, {"last_error": reason}):
+            raise LeaseHeldError(f"concurrent update on task {task_id}")
+        journal.append(task_id, EventType.BUDGET_EXCEEDED, reason, assessment.payload())
+        return task_to_read(row)
+
     status = TaskStatus(row.status)
     if status in {TaskStatus.PENDING, TaskStatus.RETRY_WAIT, TaskStatus.BLOCKED}:
         row = transition_task(
@@ -380,6 +389,9 @@ def claim_in_session(
         started_at=now,
         finished_at=None,
         idempotency_key=row.idempotency_key,
+        worker_kind=kind,
+        cost_source="unknown",
+        cost_marker="unknown",
     )
     session.add(attempt)
     session.flush()

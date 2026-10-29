@@ -60,6 +60,8 @@ class TaskRow(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     approval_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    issue_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    budget_ceilings: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # optimistic lock
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -112,8 +114,44 @@ class TaskAttemptRow(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    worker_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    runtime_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_source: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    cost_marker: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    cost_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     task: Mapped[TaskRow] = relationship(back_populates="attempt_rows")
+
+
+class AERExportRow(Base):
+    """Outbox for one journal event. Delivery failure stays on this row."""
+
+    __tablename__ = "aer_exports"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_aer_exports_event_id"),
+        Index("ix_aer_exports_status", "status"),
+        Index("ix_aer_exports_task", "task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=False)
+    event_id: Mapped[int] = mapped_column(Integer, ForeignKey("task_events.id"), nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    body: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    task: Mapped[TaskRow] = relationship()
+    event: Mapped[TaskEventRow] = relationship()
 
 
 class InboundDeliveryRow(Base):

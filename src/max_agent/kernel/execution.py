@@ -9,6 +9,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session, sessionmaker
 
 from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
+from max_agent.kernel.economics import assess_budget
 from max_agent.kernel.errors import StaleFenceError
 from max_agent.kernel.journal import Journal
 from max_agent.kernel.lease import AttemptClaim, select_task_for_finalize
@@ -17,6 +18,7 @@ from max_agent.kernel.readmodel import task_to_read
 from max_agent.kernel.retry import backoff_delay_seconds
 from max_agent.kernel.timeutil import as_utc
 from max_agent.kernel.verification import verify
+from max_agent.models.aer import CostReading, usage_from_result
 from max_agent.models.enums import AttemptStatus, EventType, FailureClass, TaskStatus, WorkerKind
 from max_agent.models.schemas import TaskRead, WorkerResult
 from max_agent.workers.base import Worker, WorkerContext
@@ -140,6 +142,8 @@ def finalize_in_session(
         _reject_fence(session, row, claim)
 
     journal = Journal(session)
+    attempt_row = session.get(TaskAttemptRow, claim.attempt_id)
+    reading, stamp = _usage_stamp(claim, result, attempt_row)
     journal.append(
         claim.task_id,
         EventType.WORKER_OUTPUT,
@@ -152,10 +156,13 @@ def finalize_in_session(
         result.summary,
         {
             "attempt": claim.attempt_no,
+            "attempt_id": claim.attempt_id,
             "ok": result.ok,
             "error": result.error,
             "recoverable": result.recoverable,
             "failure_class": failure_hint.value if failure_hint else None,
+            "cost": reading.model_dump(mode="json"),
+            "worker": stamp,
         },
     )
 
@@ -171,6 +178,8 @@ def finalize_in_session(
             recoverable=bool(result.recoverable) if failure_class != FailureClass.TIMEOUT else True,
             error=result.error or result.summary,
             summary=result.summary,
+            reading=reading,
+            stamp=stamp,
         )
         row = _fail_task(
             session,
@@ -184,6 +193,7 @@ def finalize_in_session(
             backoff_cap_seconds=backoff_cap_seconds,
             journal=journal,
         )
+        _note_budget(session, row, journal)
         return task_to_read(row)
 
     row = transition_task(session, row, TaskStatus.VERIFYING, "verifying acceptance criteria", journal=journal)
@@ -209,6 +219,8 @@ def finalize_in_session(
             recoverable=True,
             error=None,
             summary=result.summary,
+            reading=reading,
+            stamp=stamp,
         )
         row = transition_task(
             session,
@@ -225,6 +237,7 @@ def finalize_in_session(
             },
             journal=journal,
         )
+        _note_budget(session, row, journal)
         return task_to_read(row)
 
     _finish_attempt(
@@ -236,6 +249,8 @@ def finalize_in_session(
         recoverable=True,
         error=verdict.message,
         summary=result.summary,
+        reading=reading,
+        stamp=stamp,
     )
     row = _fail_task(
         session,
@@ -249,7 +264,58 @@ def finalize_in_session(
         backoff_cap_seconds=backoff_cap_seconds,
         journal=journal,
     )
+    _note_budget(session, row, journal)
     return task_to_read(row)
+
+
+def _usage_stamp(
+    claim: AttemptClaim,
+    result: WorkerResult,
+    attempt: TaskAttemptRow | None,
+) -> tuple[CostReading, dict[str, Any]]:
+    reading = usage_from_result(result.usage, result.outputs)
+    model = reading.model or _text(result.outputs.get("model"))
+    provider = reading.provider or _text(result.outputs.get("provider"))
+    if model != reading.model or provider != reading.provider:
+        reading = reading.model_copy(update={"model": model, "provider": provider})
+    runtime_ms = _runtime_ms(attempt.started_at if attempt is not None else None)
+    stamp = {
+        "worker_kind": claim.worker_kind,
+        "model": model,
+        "provider": provider,
+        "runtime_ms": runtime_ms,
+        "runtime_marker": "measured" if runtime_ms is not None else "unknown",
+    }
+    return reading, stamp
+
+
+def _runtime_ms(started_at: datetime | None) -> int | None:
+    start = as_utc(started_at)
+    if start is None:
+        return None
+    end = as_utc(utcnow())
+    if end is None:
+        return None
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def _text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _note_budget(session: Session, row: TaskRow, journal: Journal) -> None:
+    assessment = assess_budget(session, row)
+    if assessment.status != "exceeded":
+        return
+    journal.append(
+        row.id,
+        EventType.BUDGET_EXCEEDED,
+        assessment.reason,
+        assessment.payload(),
+    )
 
 
 def _resolve_worker(kind: str, resolver: Callable[[WorkerKind], Worker] | None) -> Worker:
@@ -323,6 +389,8 @@ def _finish_attempt(
     recoverable: bool,
     error: str | None,
     summary: str,
+    reading: CostReading | None = None,
+    stamp: dict[str, Any] | None = None,
 ) -> None:
     attempt = session.get(TaskAttemptRow, claim.attempt_id)
     if attempt is None or int(attempt.fencing_token) != claim.fencing_token:
@@ -334,6 +402,23 @@ def _finish_attempt(
     attempt.error = error
     attempt.summary = summary
     attempt.finished_at = utcnow()
+    if reading is not None:
+        attempt.cost_source = reading.source
+        attempt.cost_marker = reading.marker
+        attempt.cost_amount = reading.amount
+        attempt.cost_currency = reading.currency
+        attempt.input_tokens = reading.input_tokens
+        attempt.output_tokens = reading.output_tokens
+        if reading.model:
+            attempt.model = reading.model
+        if reading.provider:
+            attempt.provider = reading.provider
+    if stamp is not None:
+        if stamp.get("worker_kind"):
+            attempt.worker_kind = str(stamp["worker_kind"])
+        runtime_ms = stamp.get("runtime_ms")
+        if isinstance(runtime_ms, int):
+            attempt.runtime_ms = runtime_ms
     session.flush()
 
 

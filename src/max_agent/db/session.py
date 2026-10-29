@@ -71,6 +71,8 @@ def get_session_factory(url: str | None = None) -> sessionmaker[Session]:
 
 
 def init_db(url: str | None = None) -> None:
+    from max_agent.db import models as _models  # noqa: F401
+
     engine = get_engine(url)
     Base.metadata.create_all(bind=engine)
 
