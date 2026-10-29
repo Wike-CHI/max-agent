@@ -32,6 +32,7 @@ def _create(arguments: dict[str, Any]) -> dict[str, Any]:
         idempotency_key=arguments.get("idempotency_key"),
         has_side_effects=bool(arguments.get("has_side_effects") or False),
         tags=list(arguments.get("tags") or []),
+        dependencies=list(arguments.get("dependencies") or []),
     )
     with session_scope() as session:
         task = TaskService(session).create(data)
@@ -68,9 +69,26 @@ def _approve(arguments: dict[str, Any]) -> dict[str, Any]:
     task_id = str(arguments["task_id"])
     actor = str(arguments.get("actor") or "user")
     note = str(arguments.get("note") or "")
+    scope = list(arguments.get("scope") or [])
+    ttl = arguments.get("ttl_seconds")
     with session_scope() as session:
-        task = TaskService(session).approve(task_id, actor=actor, note=note)
+        task = TaskService(session).approve(
+            task_id,
+            actor=actor,
+            note=note,
+            scope=scope,
+            ttl_seconds=None if ttl is None else int(ttl),
+        )
     return envelope(command="max_approve", task=task)
+
+
+def _reject(arguments: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(arguments["task_id"])
+    actor = str(arguments.get("actor") or "user")
+    note = str(arguments.get("note") or "")
+    with session_scope() as session:
+        task = TaskService(session).reject(task_id, actor=actor, note=note)
+    return envelope(command="max_reject", task=task)
 
 
 _TOOL_FNS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -79,6 +97,7 @@ _TOOL_FNS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "max_events": _events,
     "max_cancel": _cancel,
     "max_approve": _approve,
+    "max_reject": _reject,
 }
 
 
@@ -98,6 +117,7 @@ def tool_specs() -> list[dict[str, Any]]:
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "has_side_effects": {"type": "boolean"},
                     "priority": {"type": "integer"},
+                    "dependencies": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["goal"],
             },
@@ -135,6 +155,19 @@ def tool_specs() -> list[dict[str, Any]]:
         {
             "name": "max_approve",
             "description": "Record explicit user approval before publish, payment, or remote write.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "actor": {"type": "string"},
+                    "note": {"type": "string"},
+                },
+                "required": ["task_id"],
+            },
+        },
+        {
+            "name": "max_reject",
+            "description": "Reject approval. External actions must not run after this.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

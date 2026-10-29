@@ -54,5 +54,9 @@ def task_to_read(row: TaskRow) -> TaskRead:
         approved_at=row.approved_at,
         approved_by=row.approved_by,
         approval_note=row.approval_note,
-        issue_ref=row.issue_ref,
+        approval_scope=[str(item) for item in (row.approval_scope or [])],
+        approval_expires_at=row.approval_expires_at,
+        approval_decision=row.approval_decision,
+        cancel_requested_at=row.cancel_requested_at,
+        issue_ref=row.issue_ref
     )

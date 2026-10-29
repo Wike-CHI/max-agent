@@ -15,9 +15,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from max_agent.db.models import TaskRow, utcnow
 from max_agent.db.session import get_session_factory
-from max_agent.kernel.errors import LeaseHeldError
-from max_agent.kernel.execution import execute_claim, finalize_in_session, next_ready_id
+from max_agent.kernel.errors import ConcurrencyLimitError, LeaseHeldError
+from max_agent.kernel.execution import execute_claim, finalize_in_session
 from max_agent.kernel.lease import AttemptClaim, claim_in_session, recover_expired_in_session
+from max_agent.kernel.queue import QueuePolicy, pick_next
 from max_agent.kernel.readmodel import task_to_read
 from max_agent.models.enums import TaskStatus, WorkerKind
 from max_agent.models.schemas import ScheduleRequest, TaskRead
@@ -77,6 +78,9 @@ class Scheduler:
         backoff_base_seconds: float = 1.0,
         backoff_cap_seconds: float = 300.0,
         worker_resolver: Callable[[WorkerKind], Worker] | None = None,
+        max_concurrency: int = 1,
+        starve_after_seconds: float = 3600.0,
+        fairness_step: int = 10,
     ) -> None:
         self._external = session
         if session_factory is not None:
@@ -93,6 +97,13 @@ class Scheduler:
         self.backoff_base_seconds = backoff_base_seconds
         self.backoff_cap_seconds = backoff_cap_seconds
         self.worker_resolver = worker_resolver
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be >= 1")
+        self.policy = QueuePolicy(
+            max_concurrency=max_concurrency,
+            starve_after_seconds=starve_after_seconds,
+            fairness_step=fairness_step,
+        )
 
     @contextmanager
     def _transaction(self) -> Iterator[Session]:
@@ -144,6 +155,7 @@ class Scheduler:
                 automatic=False,
                 backoff_base_seconds=self.backoff_base_seconds,
                 backoff_cap_seconds=self.backoff_cap_seconds,
+                max_concurrency=self.policy.max_concurrency,
             )
         self._sync_external()
         if not isinstance(outcome, AttemptClaim):
@@ -185,17 +197,35 @@ class Scheduler:
         finally:
             self._sync_external()
 
+    def run_queue(self, *, max_tasks: int | None = None, req: ScheduleRequest | None = None) -> list[TaskRead]:
+        """Run ready tasks until the queue is empty, the cap is hit, or `max_tasks` finish."""
+        req = req or ScheduleRequest()
+        done: list[TaskRead] = []
+        while max_tasks is None or len(done) < max_tasks:
+            try:
+                task = self.run_one(None, req)
+            except LookupError:
+                break
+            except ConcurrencyLimitError:
+                break
+            done.append(task)
+            if task.status in {TaskStatus.READY, TaskStatus.PENDING}:
+                break
+        return done
+
     def _run_automatic(self, req: ScheduleRequest) -> TaskRead:
         excluded: set[str] = set()
         while True:
             with self._transaction() as session:
-                task_id = next_ready_id(session, utcnow(), excluded)
-            if task_id is None:
+                pick = pick_next(session, utcnow(), excluded, self.policy)
+            if pick.reason == "concurrency":
+                raise ConcurrencyLimitError(f"concurrency limit {self.policy.max_concurrency} reached")
+            if pick.task_id is None:
                 raise LookupError("no ready tasks")
             try:
-                return self._run_id(task_id, req, automatic=True)
+                return self._run_id(pick.task_id, req, automatic=True)
             except LeaseHeldError:
-                excluded.add(task_id)
+                excluded.add(pick.task_id)
 
     def _run_id(self, task_id: str, req: ScheduleRequest, *, automatic: bool) -> TaskRead:
         with self._transaction() as session:
@@ -209,6 +239,7 @@ class Scheduler:
                 automatic=automatic,
                 backoff_base_seconds=self.backoff_base_seconds,
                 backoff_cap_seconds=self.backoff_cap_seconds,
+                max_concurrency=self.policy.max_concurrency,
             )
         if not isinstance(outcome, AttemptClaim):
             return outcome

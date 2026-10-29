@@ -16,9 +16,11 @@ from max_agent.models.enums import TaskStatus
 from max_agent.models.schemas import (
     ApproveRequest,
     InboundEvent,
+    RejectRequest,
     ScheduleRequest,
     TaskCreate,
     TaskEventRead,
+    TaskGraphCreate,
     TaskRead,
 )
 
@@ -32,8 +34,20 @@ def health() -> dict[str, str]:
 
 @router.post("/tasks", response_model=TaskRead)
 def create_task(body: TaskCreate) -> TaskRead:
-    with session_scope() as session:
-        return TaskService(session).create(body)
+    try:
+        with session_scope() as session:
+            return TaskService(session).create(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/tasks/graph", response_model=list[TaskRead])
+def create_task_graph(body: TaskGraphCreate) -> list[TaskRead]:
+    try:
+        with session_scope() as session:
+            return TaskService(session).create_graph(body.nodes)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/tasks", response_model=list[TaskRead])
@@ -52,6 +66,12 @@ def get_task(task_id: str) -> TaskRead:
             return TaskService(session).get(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/queue/run", response_model=list[TaskRead])
+def run_queue(limit: int = Query(default=50, ge=1, le=500)) -> list[TaskRead]:
+    """Run ready tasks in fair order. Does not start work past the concurrency cap."""
+    return Scheduler().run_queue(max_tasks=limit)
 
 
 @router.post("/tasks/{task_id}/schedule", response_model=TaskRead)
@@ -94,8 +114,27 @@ def approve_task(task_id: str, body: ApproveRequest | None = None) -> dict:
     body = body or ApproveRequest()
     try:
         with session_scope() as session:
-            task = TaskService(session).approve(task_id, actor=body.actor, note=body.note)
+            task = TaskService(session).approve(
+                task_id,
+                actor=body.actor,
+                note=body.note,
+                scope=list(body.scope),
+                ttl_seconds=body.ttl_seconds,
+            )
         return envelope(command="approve", task=task)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/reject")
+def reject_task(task_id: str, body: RejectRequest | None = None) -> dict:
+    body = body or RejectRequest()
+    try:
+        with session_scope() as session:
+            task = TaskService(session).reject(task_id, actor=body.actor, note=body.note)
+        return envelope(command="reject", task=task)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

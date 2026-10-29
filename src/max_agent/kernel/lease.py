@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
 from max_agent.kernel.economics import assess_budget
-from max_agent.kernel.errors import LeaseHeldError
+from max_agent.kernel.errors import ConcurrencyLimitError, LeaseHeldError
 from max_agent.kernel.journal import Journal
 from max_agent.kernel.mutate import cas_update, transition_task
 from max_agent.kernel.readmodel import task_to_read
@@ -27,7 +27,7 @@ from max_agent.kernel.retry import backoff_delay_seconds
 from max_agent.kernel.timeutil import as_utc
 from max_agent.models.enums import AttemptStatus, EventType, FailureClass, TaskStatus
 from max_agent.models.schemas import ScheduleRequest, TaskRead
-from max_agent.policy.approval import requires_human_approval
+from max_agent.policy.approval import approval_hold
 
 _IN_FLIGHT = frozenset({TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.VERIFYING})
 _TERMINAL_SCHEDULE = frozenset({TaskStatus.SUCCEEDED, TaskStatus.CANCELLED, TaskStatus.FAILED})
@@ -94,12 +94,10 @@ def _load(session: Session, task_id: str, *, skip_locked: bool) -> TaskRow:
     raise LeaseHeldError(f"task {task_id} is locked by another worker")
 
 
-def _deps_satisfied(session: Session, row: TaskRow) -> bool:
-    for dep_id in list(row.dependencies or []):
-        dep = session.get(TaskRow, dep_id)
-        if dep is None or TaskStatus(dep.status) != TaskStatus.SUCCEEDED:
-            return False
-    return True
+def active_inflight_count(session: Session, now: datetime) -> int:
+    """Unexpired leased/running/verifying rows. Expired leases do not hold a slot."""
+    rows = session.query(TaskRow).filter(TaskRow.status.in_([status.value for status in _IN_FLIGHT])).all()
+    return sum(1 for row in rows if not lease_expired(row, now))
 
 
 def _close_open_attempts(
@@ -147,24 +145,27 @@ def recover_inflight(
         return row
     reason = "lease expired before worker finalize"
     old_token = int(row.fencing_token or 0)
-    is_retry = True
-    need, block_reason = requires_human_approval(
+    hold = approval_hold(
         tags=list(row.tags or []),
         has_side_effects=bool(row.has_side_effects),
-        is_retry=is_retry,
+        is_retry=True,
         confirm_side_effects=confirm_side_effects,
         allow_auto_retry_side_effects=bool(row.allow_auto_retry_side_effects),
         idempotency_key=row.idempotency_key,
-        approval_granted=row.approved_at is not None,
+        approved_at=row.approved_at,
+        approval_decision=row.approval_decision,
+        approval_expires_at=row.approval_expires_at,
+        approval_scope=list(row.approval_scope or []),
+        now=now,
     )
     if int(row.attempts) >= int(row.max_attempts):
         target = TaskStatus.FAILED
         message = f"lease expired and max attempts exhausted: {reason}"
         last_error = message
-    elif need:
-        target = TaskStatus.BLOCKED
-        message = block_reason
-        last_error = block_reason
+    elif hold.status is not None:
+        target = hold.status
+        message = hold.reason
+        last_error = hold.reason
     else:
         target = TaskStatus.RETRY_WAIT
         message = reason
@@ -176,6 +177,8 @@ def recover_inflight(
         "failure_class": FailureClass.CRASH.value,
         "last_error": last_error,
     }
+    if hold.decision and target == hold.status:
+        extra["approval_decision"] = hold.decision
     if target == TaskStatus.RETRY_WAIT:
         delay = backoff_delay_seconds(
             int(row.attempts),
@@ -205,8 +208,13 @@ def recover_inflight(
         reason,
         {"fencing_token": old_token, "to": target.value},
     )
-    if target == TaskStatus.BLOCKED:
-        journal.append(row.id, EventType.APPROVAL_REQUIRED, block_reason, {"crash_recovery": True})
+    if target in {TaskStatus.BLOCKED, TaskStatus.WAITING_APPROVAL}:
+        journal.append(
+            row.id,
+            hold.event or EventType.APPROVAL_REQUIRED,
+            message,
+            {"crash_recovery": True},
+        )
     elif target == TaskStatus.RETRY_WAIT:
         journal.append(row.id, EventType.RECOVERED, "expired lease queued for retry", {"attempt": row.attempts})
     else:
@@ -242,6 +250,9 @@ def recover_expired_in_session(
         )
         if recovered is not None and TaskStatus(recovered.status) not in _IN_FLIGHT:
             changed[recovered.id] = recovered.status
+    from max_agent.kernel.dag import wake_satisfied
+
+    wake_satisfied(session, now=now)
     return changed
 
 
@@ -256,13 +267,17 @@ def claim_in_session(
     automatic: bool,
     backoff_base_seconds: float,
     backoff_cap_seconds: float,
+    max_concurrency: int = 1,
 ) -> AttemptClaim | TaskRead:
     """Commit-ready claim. Caller must commit before worker.run()."""
+    from max_agent.kernel.dag import deps_satisfied
+
     row = _load(session, task_id, skip_locked=True)
     status = TaskStatus(row.status)
     if status in _TERMINAL_SCHEDULE:
         raise ValueError(f"cannot schedule terminal task status={status}")
 
+    recovered_now = False
     if status in _IN_FLIGHT:
         if not lease_expired(row, now):
             raise LeaseHeldError(
@@ -279,6 +294,7 @@ def claim_in_session(
         if recovered is None:
             raise LeaseHeldError(f"lost recovery race for task {task_id}")
         row = recovered
+        recovered_now = True
         status = TaskStatus(row.status)
         if status in _TERMINAL_SCHEDULE:
             raise ValueError(f"cannot schedule terminal task status={status}")
@@ -288,45 +304,8 @@ def claim_in_session(
         if nxt is not None and nxt > as_utc(now):  # type: ignore[operator]
             return task_to_read(row)
 
-    is_retry = int(row.attempts) > 0 or status == TaskStatus.RETRY_WAIT
-    need, reason = requires_human_approval(
-        tags=list(row.tags or []),
-        has_side_effects=bool(row.has_side_effects),
-        is_retry=is_retry,
-        confirm_side_effects=req.confirm_side_effects,
-        allow_auto_retry_side_effects=bool(row.allow_auto_retry_side_effects),
-        idempotency_key=row.idempotency_key,
-        approval_granted=row.approved_at is not None,
-    )
     journal = Journal(session)
-    if need:
-        if status != TaskStatus.BLOCKED:
-            row = transition_task(
-                session,
-                row,
-                TaskStatus.BLOCKED,
-                reason,
-                extra={"last_error": reason, "leased_by": None, "lease_expires_at": None},
-                journal=journal,
-            )
-        else:
-            row = transition_task(
-                session,
-                row,
-                TaskStatus.BLOCKED,
-                reason,
-                extra={"last_error": reason},
-                journal=journal,
-            )
-        journal.append(
-            task_id,
-            EventType.APPROVAL_REQUIRED,
-            reason,
-            {"confirm_side_effects": req.confirm_side_effects},
-        )
-        return task_to_read(row)
-
-    if not _deps_satisfied(session, row):
+    if not deps_satisfied(session, row):
         if TaskStatus(row.status) != TaskStatus.BLOCKED:
             row = transition_task(
                 session,
@@ -334,6 +313,38 @@ def claim_in_session(
                 TaskStatus.BLOCKED,
                 "dependencies not satisfied",
                 journal=journal,
+            )
+        return task_to_read(row)
+
+    is_retry = int(row.attempts) > 0 or status == TaskStatus.RETRY_WAIT
+    hold = approval_hold(
+        tags=list(row.tags or []),
+        has_side_effects=bool(row.has_side_effects),
+        is_retry=is_retry,
+        confirm_side_effects=req.confirm_side_effects,
+        allow_auto_retry_side_effects=bool(row.allow_auto_retry_side_effects),
+        idempotency_key=row.idempotency_key,
+        approved_at=row.approved_at,
+        approval_decision=row.approval_decision,
+        approval_expires_at=row.approval_expires_at,
+        approval_scope=list(row.approval_scope or []),
+        now=now,
+    )
+    if hold.status is not None:
+        extra: dict[str, Any] = {
+            "last_error": hold.reason,
+            "leased_by": None,
+            "lease_expires_at": None,
+        }
+        if hold.decision:
+            extra["approval_decision"] = hold.decision
+        row = transition_task(session, row, hold.status, hold.reason, extra=extra, journal=journal)
+        if hold.event is not None:
+            journal.append(
+                task_id,
+                hold.event,
+                hold.reason,
+                {"confirm_side_effects": req.confirm_side_effects},
             )
         return task_to_read(row)
 
@@ -345,8 +356,13 @@ def claim_in_session(
         journal.append(task_id, EventType.BUDGET_EXCEEDED, reason, assessment.payload())
         return task_to_read(row)
 
+    if active_inflight_count(session, now) >= max(1, int(max_concurrency)):
+        if recovered_now:
+            return task_to_read(row)
+        raise ConcurrencyLimitError(f"concurrency limit {max_concurrency} reached")
+
     status = TaskStatus(row.status)
-    if status in {TaskStatus.PENDING, TaskStatus.RETRY_WAIT, TaskStatus.BLOCKED}:
+    if status in {TaskStatus.PENDING, TaskStatus.RETRY_WAIT, TaskStatus.BLOCKED, TaskStatus.WAITING_APPROVAL}:
         row = transition_task(
             session,
             row,

@@ -14,7 +14,8 @@ class TaskStatus(StrEnum):
     - verifying: worker reported done; kernel verifying acceptance
     - succeeded: acceptance criteria passed
     - failed: terminal failure (max attempts / non-recoverable)
-    - blocked: waiting on dependency or human approval
+    - blocked: waiting on a dependency, or a side-effect retry that still needs confirmation
+    - waiting_approval: human approval gate (approver, scope, expiry). Not cancel or timeout
     - cancelled: user cancelled
     - retry_wait: recoverable failure; waiting to retry
     """
@@ -27,6 +28,7 @@ class TaskStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     BLOCKED = "blocked"
+    WAITING_APPROVAL = "waiting_approval"
     CANCELLED = "cancelled"
     RETRY_WAIT = "retry_wait"
 
@@ -62,6 +64,8 @@ class EventType(StrEnum):
     CANCELLED = "cancelled"
     APPROVAL_REQUIRED = "approval_required"
     APPROVED = "approved"
+    APPROVAL_REJECTED = "approval_rejected"
+    APPROVAL_EXPIRED = "approval_expired"
     INBOUND = "inbound"
     IDEMPOTENT_HIT = "idempotent_hit"
     LEASE_EXPIRED = "lease_expired"
