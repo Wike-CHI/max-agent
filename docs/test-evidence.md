@@ -1,0 +1,48 @@
+# Test Evidence
+
+Captured: 2026-10-29 17:13:02 CST (Asia/Shanghai)
+
+## Environment (brief)
+
+```
+Python 3.13.5
+uv 0.13.5 (x86_64-unknown-linux-gnu)
+git version 2.47.3
+```
+
+## pytest
+
+```
+$ cd /workspace/max-agent && uv run pytest -q
+/workspace/max-agent/.venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+.............                                                            [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.13/site-packages/fastapi/testclient.py:1
+  /workspace/max-agent/.venv/lib/python3.13/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+13 passed, 1 warning in 1.06s
+```
+
+## Acceptance demo (key outcomes)
+
+- Create mock task → persisted, status `ready` → run → `succeeded`
+- Journal events include created / status_changed / attempt_* / tool_call / verification
+- LocalCodeWorker write+pytest → `succeeded` (`/tmp/max_agent_mvp_demo.py`)
+- Recoverable mock failure → `retry_wait` with last_error
+- New process query after reset_engine → prior tasks/events still readable
+
+## Commands
+
+```bash
+export MAX_AGENT_DB_PATH=/workspace/max-agent/data/acceptance.db
+uv run max-agent init-db
+uv run max-agent create "..." -c worker_ok -w mock --payload '{"mode":"success","answer":"42"}' -k accept-mock-1
+uv run max-agent run <TASK_ID>
+uv run max-agent events <TASK_ID>
+bash scripts/acceptance_demo.sh
+```
