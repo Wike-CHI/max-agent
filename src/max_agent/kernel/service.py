@@ -48,10 +48,14 @@ class TaskService:
         row = self._get_row(task_id)
         return self._to_read(row)
 
-    def list_tasks(self, *, status: TaskStatus | None = None, limit: int = 100) -> list[TaskRead]:
+    def list_tasks(
+        self, *, status: TaskStatus | None = None, limit: int = 100, created_by: str | None = None
+    ) -> list[TaskRead]:
         q = self.session.query(TaskRow).order_by(TaskRow.created_at.desc())
         if status is not None:
             q = q.filter(TaskRow.status == status.value)
+        if created_by is not None:
+            q = q.filter(TaskRow.created_by == created_by)
         return [self._to_read(r) for r in q.limit(limit).all()]
 
     def trace(self, task_id: str) -> TaskTrace:
@@ -80,23 +84,28 @@ class TaskService:
 
     # ----- writes -----
 
-    def create(self, data: TaskCreate) -> TaskRead:
+    def create(self, data: TaskCreate, *, created_by: str = "user") -> TaskRead:
         if data.idempotency_key:
-            existing = self._idempotent_hit(data.idempotency_key)
+            existing = self._idempotent_hit(data.idempotency_key, created_by=created_by)
             if existing is not None:
                 return existing
+
+        for dependency in data.dependencies:
+            existing = self.session.get(TaskRow, str(dependency))
+            if existing is not None and existing.created_by != created_by:
+                raise PermissionError("task access denied")
 
         task_id = str(uuid.uuid4())
         edges = dependency_edges(self.session)
         edges[task_id] = [str(item) for item in data.dependencies]
         assert_acyclic(edges)
-        row = self._insert_new(task_id, data, [str(item) for item in data.dependencies])
+        row = self._insert_new(task_id, data, [str(item) for item in data.dependencies], created_by=created_by)
         self.session.flush()
         self._apply_initial_status(row)
         self.session.flush()
         return self._to_read(row)
 
-    def create_graph(self, nodes: list[GraphNode]) -> list[TaskRead]:
+    def create_graph(self, nodes: list[GraphNode], *, created_by: str = "user") -> list[TaskRead]:
         """Insert a DAG. A cycle or unknown key stores nothing."""
         if not nodes:
             raise ValueError("graph has no nodes")
@@ -121,10 +130,13 @@ class TaskService:
             for dep in node.depends_on:
                 if dep in key_to_id:
                     deps.append(key_to_id[dep])
-                elif self.session.get(TaskRow, dep) is not None:
-                    deps.append(dep)
-                else:
+                    continue
+                existing = self.session.get(TaskRow, dep)
+                if existing is None:
                     raise ValueError(f"unknown dependency: {dep}")
+                if existing.created_by != created_by:
+                    raise PermissionError("task access denied")
+                deps.append(dep)
             resolved[task_id] = deps
 
         edges = dependency_edges(self.session)
@@ -134,7 +146,7 @@ class TaskService:
         rows: list[TaskRow] = []
         for node in nodes:
             task_id = key_to_id[node.key]
-            rows.append(self._insert_new(task_id, node.to_create(), resolved[task_id]))
+            rows.append(self._insert_new(task_id, node.to_create(), resolved[task_id], created_by=created_by))
         self.session.flush()
         for row in rows:
             self._apply_initial_status(row)
@@ -300,10 +312,12 @@ class TaskService:
 
     # ----- internals -----
 
-    def _idempotent_hit(self, key: str) -> TaskRead | None:
+    def _idempotent_hit(self, key: str, *, created_by: str) -> TaskRead | None:
         existing = self.session.query(TaskRow).filter(TaskRow.idempotency_key == key).one_or_none()
         if existing is None:
             return None
+        if existing.created_by != created_by:
+            raise PermissionError("task access denied")
         self.journal.append(
             existing.id,
             EventType.IDEMPOTENT_HIT,
@@ -315,13 +329,16 @@ class TaskService:
         replay.idempotent_replay = True
         return replay
 
-    def _insert_new(self, task_id: str, data: TaskCreate, dependencies: list[str]) -> TaskRow:
+    def _insert_new(
+        self, task_id: str, data: TaskCreate, dependencies: list[str], *, created_by: str
+    ) -> TaskRow:
         budget = data.budget
         timeout = data.timeout_seconds if data.timeout_seconds is not None else budget.timeout_seconds
         issue_ref = explicit_issue_ref(data.issue_ref, data.tags)
         row = TaskRow(
             id=task_id,
             goal=data.goal,
+            created_by=created_by,
             acceptance_criteria=list(data.acceptance_criteria),
             priority=data.priority,
             dependencies=list(dependencies),

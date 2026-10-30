@@ -58,6 +58,8 @@ def test_tag_must_match_package_version() -> None:
 def test_release_workflow_writes_provenance() -> None:
     text = Path(".github/workflows/release.yml").read_text()
     assert "scripts/release_provenance.py" in text
+    assert "release_flags+=(--prerelease)" in text
+    assert '"$GITHUB_REF_NAME" == v0.*' in text
 
 
 def test_build_provenance_subjects_use_sha256(tmp_path: Path) -> None:

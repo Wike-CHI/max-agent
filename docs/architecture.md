@@ -107,6 +107,10 @@ Grok Bot 只做一次性调用：`create` 立刻返回 `task_id`，之后按需 
 
 Inbound webhook（`POST /v1/inbound/webhook`）校验 HMAC，用 `X-Max-Delivery-Id` 去重，并用 body 里的 `idempotency_key` 关联到已有任务。它只创建任务，不执行。
 
+## HTTP 认证与任务授权
+
+除 health/ready 和独立 HMAC 校验的 webhook 外，HTTP API 都要求 `Authorization: Bearer <MAX_AGENT_API_TOKEN>`，包括任务读改、队列、telemetry、metrics 与 AER retry。`MAX_AGENT_API_ACTOR` 给出单用户主体（默认 `user`），任务的 `created_by` 是授权边界：列表只返回自己的任务，其他主体的读写、调度、取消与审批返回 403。审批请求里的 `actor` 仅作一致性校验；记录值永远来自认证主体，不一致返回 403。未配置 token 时受保护接口 fail closed。OIDC 和多租户 IAM 不在当前范围内。
+
 ## 人工审批策略
 
 - 标签含 `delete|deploy|payment|publish|permission|production|external_write` → 状态是 `waiting_approval`，必须先 `approve`。`run --confirm-side-effects` 不能代替这次授权。
@@ -125,4 +129,4 @@ Inbound webhook（`POST /v1/inbound/webhook`）校验 HMAC，用 `X-Max-Delivery
 
 `alembic downgrade c4a91e0b7d55` 会删除 `aer_exports` 以及任务上的 `issue_ref` / `budget_ceilings`、attempt 上的成本列。已导出到 `MAX_AGENT_AER_DIR` 的 JSON 是本地文件，删除该目录即可。这个变更不调用外部付费 API，也没有生产部署。
 
-当前 head 的 `alembic downgrade -1` 只去掉审批列，不删除 `task_events`。数据回滚以快照恢复为准，步骤在 `docs/operations/postgres.md`。发布和审批门禁在 `docs/operations/`。
+当前 head 的 `alembic downgrade -1` 只去掉 `created_by` 及其索引，不删除 `task_events`；重新 upgrade 会把已有任务归到默认 `user` 主体。数据回滚以快照恢复为准，步骤在 `docs/operations/postgres.md`。发布和审批门禁在 `docs/operations/`。

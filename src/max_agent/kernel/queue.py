@@ -46,15 +46,23 @@ def effective_priority(priority: int, created_at: datetime | None, now: datetime
     return int(priority) - boost
 
 
-def pick_next(session: Session, now: datetime, exclude: set[str], policy: QueuePolicy | None = None) -> QueuePick:
+def pick_next(
+    session: Session,
+    now: datetime,
+    exclude: set[str],
+    policy: QueuePolicy | None = None,
+    *,
+    created_by: str | None = None,
+) -> QueuePick:
     policy = policy or QueuePolicy()
     if active_inflight_count(session, now) >= policy.max_concurrency:
         return QueuePick(None, "concurrency")
-    rows = (
-        session.query(TaskRow)
-        .filter(TaskRow.status.in_([TaskStatus.READY.value, TaskStatus.RETRY_WAIT.value]))
-        .all()
+    query = session.query(TaskRow).filter(
+        TaskRow.status.in_([TaskStatus.READY.value, TaskStatus.RETRY_WAIT.value])
     )
+    if created_by is not None:
+        query = query.filter(TaskRow.created_by == created_by)
+    rows = query.all()
     current = as_utc(now)
     eligible: list[TaskRow] = []
     for row in rows:
