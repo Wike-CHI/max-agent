@@ -22,16 +22,19 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: Require linked Issue or scoped Dependabot exception
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
           PR_BODY: ${{ github.event.pull_request.body }}
           GITHUB_ACTOR: ${{ github.actor }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
+          # Prefer git over `gh pr diff` (GraphQL often fails with GITHUB_TOKEN on private repos).
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
           export PR_FILES
-          PR_FILES="$(gh pr diff "$PR_URL" --name-only)"
+          PR_FILES="$(git diff --name-only "origin/${BASE_REF}...HEAD")"
           python scripts/check_pr_issue_link.py
 
   tests:
