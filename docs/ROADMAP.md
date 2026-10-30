@@ -37,6 +37,8 @@ Grok Bot already provides chat, a cloud computer, terminal, and app automation. 
 Issue #6 covers the economics half: versioned AER records, retryable export, and cost metrics. Task DAG, fair queue, and `WAITING_APPROVAL` stay in #7.
 | **v1.0 — Portable runtime** | Versioned, restorable deployment with Postgres and staged release | #8 | rollback/recovery drill, documented SLO and operational runbook |
 
+Issue #8 runbook: [docs/operations/README.md](operations/README.md). Merging that work does not deploy. A production change still needs a green CI run and a human approval, and the deploy workflow has no deploy step.
+
 ## Iteration principles
 
 1. Implement one vertical task completion path before adding more Agent types.
