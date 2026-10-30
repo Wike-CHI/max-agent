@@ -9,7 +9,9 @@ from max_agent.db.session import init_db, reset_engine
 
 def run_smoke(*, database_url: str) -> dict[str, object]:
     previous = os.environ.get("MAX_AGENT_DATABASE_URL")
+    previous_token = os.environ.get("MAX_AGENT_API_TOKEN")
     os.environ["MAX_AGENT_DATABASE_URL"] = database_url
+    os.environ["MAX_AGENT_API_TOKEN"] = previous_token or "staging-smoke-token"
     reset_engine()
     try:
         init_db(database_url)
@@ -17,7 +19,8 @@ def run_smoke(*, database_url: str) -> dict[str, object]:
 
         from max_agent.api.app import create_app
 
-        with TestClient(create_app()) as client:
+        headers = {"Authorization": f"Bearer {os.environ['MAX_AGENT_API_TOKEN']}"}
+        with TestClient(create_app(), headers=headers) as client:
             health = client.get("/v1/health")
             ready = client.get("/v1/ready")
             created = client.post(
@@ -49,3 +52,7 @@ def run_smoke(*, database_url: str) -> dict[str, object]:
             os.environ.pop("MAX_AGENT_DATABASE_URL", None)
         else:
             os.environ["MAX_AGENT_DATABASE_URL"] = previous
+        if previous_token is None:
+            os.environ.pop("MAX_AGENT_API_TOKEN", None)
+        else:
+            os.environ["MAX_AGENT_API_TOKEN"] = previous_token

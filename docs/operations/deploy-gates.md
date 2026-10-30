@@ -14,7 +14,7 @@ uv run --no-sync python scripts/staging_smoke.py
 uv run --no-sync python scripts/restore_drill.py
 ```
 
-The smoke test calls `/v1/health`, `/v1/ready`, and `POST /v1/tasks` on an in-process app with a temporary SQLite file. It does not contact an external host.
+The smoke test calls `/v1/health`, `/v1/ready`, and `POST /v1/tasks` on an in-process app with a temporary SQLite file. It supplies a temporary Bearer token for the protected create route and does not contact an external host or require a production credential.
 
 ## Manual production gate
 

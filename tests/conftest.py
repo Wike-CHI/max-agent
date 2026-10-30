@@ -9,6 +9,12 @@ from max_agent.db.session import init_db, reset_engine, session_scope
 
 
 @pytest.fixture(autouse=True)
+def _api_test_credentials(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MAX_AGENT_API_TOKEN", "test-api-token")
+    monkeypatch.setenv("MAX_AGENT_API_ACTOR", "user")
+
+
+@pytest.fixture(autouse=True)
 def _reset_aer_adapter():
     from max_agent.kernel.aer import set_aer_adapter
 

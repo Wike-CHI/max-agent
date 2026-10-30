@@ -359,7 +359,7 @@ def test_issue_tag_and_http_trace(db_url: str):
 
     from max_agent.api.app import create_app
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-api-token"})
     traced = client.get(f"/v1/tasks/{task_id}/trace")
     assert traced.status_code == 200
     body = traced.json()

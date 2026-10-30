@@ -108,6 +108,7 @@ class TaskGraphCreate(BaseModel):
 class TaskRead(BaseModel):
     id: str
     goal: str
+    created_by: str
     acceptance_criteria: list[str]
     priority: int
     dependencies: list[str]
@@ -159,7 +160,7 @@ class TaskEventRead(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    actor: str = Field(default="user", max_length=128)
+    actor: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=2000)
     scope: list[str] = Field(
         default_factory=list,
@@ -169,7 +170,7 @@ class ApproveRequest(BaseModel):
 
 
 class RejectRequest(BaseModel):
-    actor: str = Field(default="user", max_length=128)
+    actor: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=2000)
 
 

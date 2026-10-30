@@ -13,7 +13,7 @@ def test_api_create_run_events(tmp_path):
     os.environ["MAX_AGENT_DATABASE_URL"] = url
     reset_engine()
     init_db(url)
-    client = TestClient(create_app())
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-api-token"})
 
     r = client.get("/v1/health")
     assert r.status_code == 200

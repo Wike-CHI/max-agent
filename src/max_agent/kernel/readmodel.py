@@ -29,6 +29,7 @@ def task_to_read(row: TaskRow) -> TaskRead:
     return TaskRead(
         id=row.id,
         goal=row.goal,
+        created_by=row.created_by,
         acceptance_criteria=list(row.acceptance_criteria or []),
         priority=row.priority,
         dependencies=list(row.dependencies or []),

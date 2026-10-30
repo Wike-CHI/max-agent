@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 SECRET_ENV_NAMES = (
     "GITHUB_TOKEN",
     "GH_TOKEN",
+    "MAX_AGENT_API_TOKEN",
     "MAX_AGENT_WEBHOOK_SECRET",
     "XAI_API_KEY",
     "OPENAI_API_KEY",

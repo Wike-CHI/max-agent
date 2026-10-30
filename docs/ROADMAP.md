@@ -1,7 +1,7 @@
 # MAX-Agent — Product Roadmap
 
-> Task First, Agent as Worker. Last reviewed: 2026-10-29.
-> Status: planning; version targets are milestones, not committed delivery dates.
+> Task First, Agent as Worker. Last reviewed: 2026-10-30.
+> Status: v0.5.0 pre-release candidate; version targets are milestones, not committed delivery dates.
 > Source of truth for work: GitHub Issues + PRs; source of truth for running tasks: MAX DB.
 
 ## Problem / Differentiation
@@ -17,27 +17,40 @@ Grok Bot already provides chat, a cloud computer, terminal, and app automation. 
 - total external spend and Grok Bot usage per verified task (report missing data as unknown);
 - percentage of code-changing tasks traceable Issue → PR → CI → Task.
 
-## Already shipped — v0.1 MVP (current master)
+## Current state — v0.5.0 pre-release candidate
 
-- Pydantic Task model with idempotency key, dependencies, budget constraints and acceptance criteria.
-- SQLite persistence, SQLAlchemy/Alembic, state machine, single-Worker Scheduler.
-- MockWorker / LocalCodeWorker, rules-based verifier, event Journal, CLI and FastAPI.
-- Historical test-evidence document reports 13 passing tests.
-- Not yet production-safe for concurrent workers, external credentials or unsafe side effects.
+The project has moved beyond the original MVP. Current master includes:
+
+- Task persistence, idempotency, dependencies, budgets, acceptance criteria, atomic leases, crash recovery, DAG scheduling, fair queueing, and approval gates (#2–#4, #7).
+- Safe CLI execution in isolated worktrees, Mock/LocalCode workers, and the Claude Code CLI vendor (#4, #26).
+- Grok Bot CLI/MCP/webhook entry and a completed real end-to-end drill (#5, #20).
+- Execution Journal, AER evidence exports, cost telemetry, API token authentication, and task-level authorization (#6, #19).
+- CI, release artifacts, checksums/provenance, dependency and deployment gates, and SQLite restore coverage (#2, #8).
+
+This is **not a production-grade v1.0 announcement**. The `max-worker` daemon remains open in #21, and the archived live Postgres restore drill is currently an honest skip rather than a pass.
 
 ## Milestones (outcome-based, not date-driven)
 
-| Milestone | Outcome / demo | Linked Issues | Exit gate |
-| --- | --- | --- | --- |
-| **v0.2 — Delivery + Entry** | Grok Bot calls MAX to create/run/get a safe test Task; engineering changes flow via Issue → PR → CI | #2, #5 | PR CI passes 3.12 + 3.13; linkage is visible; Grok Bot receives Task ID and verified result |
-| **v0.3 — Durable execution** | Kill a Worker, recover its leased Task without duplicate external effects | #3 | concurrency / expiry / crash-recovery integration tests; clear idempotency policy |
-| **v0.4 — Real coding Worker** | Independently authorized CLI Worker makes a change inside an isolated worktree, verified by tests | #4 | no secret exposure, timeout/cancel respected, artifacts archived |
-| **v0.5 — Orchestration + Economics** | Task DAG, approval gate, AER traces, measurable cost per verified task | #6, #7 | trace across issue/task/attempt/pr; budget policy and DAG recovery tests |
+| Milestone | Outcome / demo | Linked Issues | Current state | Exit gate |
+| --- | --- | --- | --- | --- |
+| **v0.2 — Delivery + Entry** | Grok Bot creates/runs/gets a safe Task; engineering changes flow via Issue → PR → CI | #2, #5 | Complete | CI passes on Python 3.12/3.13; Task ID and verified result returned |
+| **v0.3 — Durable execution** | Recover a leased Task after worker interruption without duplicate external effects | #3 | Complete | Concurrency, expiry, crash-recovery tests, and idempotency policy |
+| **v0.4 — Real coding Worker** | Authorized CLI worker changes an isolated worktree and verifies the result | #4, #26 | Complete | Secret redaction, timeout/cancel handling, and archived artifacts |
+| **v0.5 — Orchestration + Economics** | DAG, approvals, AER traces, authentication, release gates, and measured execution cost | #6, #7, #8, #19, #20 | Pre-release candidate | v0.5.0 artifacts and pre-release flow verified; live Postgres pass still pending |
+| **v1.0 — Portable runtime** | Supervised worker operation and a versioned, restorable Postgres deployment | #1, #8, #21 | Not released | All v1.0 exit criteria below pass with evidence and human approval |
 
-Issue #6 covers the economics half: versioned AER records, retryable export, and cost metrics. Task DAG, fair queue, and `WAITING_APPROVAL` stay in #7.
-| **v1.0 — Portable runtime** | Versioned, restorable deployment with Postgres and staged release | #8 | rollback/recovery drill, documented SLO and operational runbook |
+Issue #8 delivered engineering and operational gates; it did not deploy a production service. Issue #20's evidence is archived at [docs/operations/evidence/grok-e2e-2026-10-30.md](operations/evidence/grok-e2e-2026-10-30.md). Issue #21 is **open**, not merged.
 
-Issue #8 runbook: [docs/operations/README.md](operations/README.md). Merging that work does not deploy. A production change still needs a green CI run and a human approval, and the deploy workflow has no deploy step.
+## Remaining gaps and v1.0 exit criteria
+
+A v1.0 tag is allowed only when all of these conditions are met:
+
+1. **Authentication and authorization:** #19 remains complete; protected APIs require authentication and task authorization, with no public unauthenticated API.
+2. **Supervised worker:** #21 is closed with acceptance evidence for task claiming, heartbeats, lease renewal, and interruption recovery.
+3. **End-to-end proof:** #20 remains complete, and the Grok Bot → Task → Worker → verified result path passes against the release candidate.
+4. **Postgres recovery:** a real disposable Postgres backup/rollback/restore drill passes and archives evidence showing no lost journal events. A SQLite-only result or a skipped live drill does not satisfy this gate.
+5. **Release health:** Python 3.12/3.13 CI, staging smoke, dependency audit, package build, checksums, and provenance generation are green for the release candidate.
+6. **Operations and approval:** rollback/runbook and SLO documentation are current, and a human explicitly approves the v1.0 release. No autonomous production deploy is implied.
 
 ## Iteration principles
 
@@ -50,15 +63,15 @@ Issue #8 runbook: [docs/operations/README.md](operations/README.md). Merging tha
 
 ## Planned architecture boundary
 
-- **Entry:** Grok Bot calls the CLI `--json` contract or the minimal stdio MCP tools (`docs/skills/grok-max-entry/SKILL.md`). HTTP status/approve and the signed inbound webhook are the same kernel. No chat UI.
+- **Entry:** Grok Bot calls the CLI `--json` contract or the minimal stdio MCP tools (`docs/skills/grok-max-entry/SKILL.md`). HTTP status/approve and the signed inbound webhook use the same authenticated kernel. No chat UI.
 - **Control:** TaskService, Scheduler, DAG, approval/policy, Worker capability registry.
-- **Execution:** replaceable Workers (Mock/LocalCode first; real CLI after sandbox work).
+- **Execution:** replaceable Workers and supervised CLI vendors, with #21 covering the remaining daemon lifecycle.
 - **Evidence:** Journal, Verification, AER export, trace/cost telemetry.
-- **Storage:** SQLite for local prototype, Postgres for concurrent runtime.
+- **Storage:** SQLite for local development, Postgres for the concurrent runtime and v1.0 recovery gate.
 
 ## Prioritization rationale
 
-Get the end-to-end Grok Bot demonstration early (v0.2); stabilize execution before handing secrets and remote write permissions to real workers (v0.3); then introduce expensive model routing only when measurable outcomes exist. A UI/dashboard is optional until the task and evidence APIs stabilize.
+Finish supervised worker recovery and real Postgres evidence before considering v1.0. Introduce expensive model routing only when measurable outcomes exist. A UI/dashboard is optional until the task and evidence APIs stabilize.
 
 ## Explicit non-goals
 

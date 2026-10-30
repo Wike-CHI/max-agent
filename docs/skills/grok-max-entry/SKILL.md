@@ -2,7 +2,7 @@
 
 MAX is the task kernel. Grok Bot is the entry. Do not store the task only in the chat, and do not keep a process alive to poll.
 
-Safe demos use `worker_kind=mock` or `local_code`. `worker_kind=cli` runs inside an isolated worktree and uses the in-repo stub unless the operator has set `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` outside the bot. Do not set that variable, and do not attach a worker that can deploy, pay, or write to production. None of these workers receive production credentials.
+Safe demos use `worker_kind=mock` or `local_code`. `worker_kind=cli` runs inside an isolated worktree and supports `grok`, `codex`, and `claude` only when the operator has set `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` outside the bot; otherwise it uses the in-repo stub or returns a classified skip. Do not set that variable, and do not attach a worker that can deploy, pay, or write to production. None of these workers receive production credentials.
 
 ## One-shot CLI
 
