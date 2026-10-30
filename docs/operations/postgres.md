@@ -67,4 +67,4 @@ MAX_AGENT_PG_DRILL=postgresql://max@localhost:5432/max_agent_drill \
   uv run --no-sync --extra postgres pytest -q tests/test_backup_restore.py::test_live_postgres_drill
 ```
 
-Current evidence: [postgres-restore-2026-10-30.json](evidence/postgres-restore-2026-10-30.json). It records a skip because this environment has no configured or reachable Postgres service. The v1.0 gate requires replacing it with a real passing result.
+Current evidence: [postgres-restore-2026-10-30.json](evidence/postgres-restore-2026-10-30.json). It records a passing live PostgreSQL drill with 2 events before the schema rollback, 2 after it, and 2 after restore; `lost_events` is empty. This satisfies the evidence requirement in v1.0 exit criterion #4, but does not by itself declare or approve v1.0.
