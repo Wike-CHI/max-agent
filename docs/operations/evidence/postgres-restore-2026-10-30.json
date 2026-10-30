@@ -1,0 +1,8 @@
+{
+  "format": "max-agent-postgres-restore-evidence-v1",
+  "recorded_at": "2026-10-30T07:08:49.420617+00:00",
+  "source_revision": "2abee5a86de5275949a640a5baf98068204113ef",
+  "command": "uv run --no-sync --extra postgres python scripts/postgres_restore_drill.py",
+  "status": "skipped",
+  "reason": "MAX_AGENT_PG_DRILL is not set; no live PostgreSQL drill was run."
+}

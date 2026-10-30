@@ -24,6 +24,7 @@ uv build
 ## Pull request requirements
 
 - PR description must include `Closes #N`, `Fixes #N`, `Resolves #N` or `Refs #N` to pass its issue-link check.
+- Official Dependabot PRs may skip the Issue link only when every changed file is under `.github/workflows/**` or is `pyproject.toml` / `uv.lock`; any expanded scope requires an Issue link. Both the event actor and PR author must be `dependabot[bot]`.
 - `Refs` links a PR to work without closing the Issue; `Closes` closes the Issue **only when merged to default branch**.
 - Include reproducible tests, resulting artifacts and relevant screenshots/logs (redact tokens).
 - State external side effects, credential needs, fallback and rollback.

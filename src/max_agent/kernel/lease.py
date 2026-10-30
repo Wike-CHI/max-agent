@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
@@ -80,6 +80,45 @@ def lease_expired(row: TaskRow, now: datetime) -> bool:
     if expires is None:
         return True
     return expires <= as_utc(now)  # type: ignore[operator]
+
+
+def renew_lease_in_session(
+    session: Session,
+    claim: AttemptClaim,
+    *,
+    now: datetime,
+    ttl_seconds: int,
+) -> datetime | None:
+    """Extend the current unexpired lease and attempt, or return None if fencing was lost."""
+    expires = now + timedelta(seconds=ttl_seconds)
+    task = session.execute(
+        update(TaskRow)
+        .where(
+            TaskRow.id == claim.task_id,
+            TaskRow.fencing_token == claim.fencing_token,
+            TaskRow.leased_by == claim.lease_owner,
+            TaskRow.status.in_([status.value for status in _IN_FLIGHT]),
+            TaskRow.lease_expires_at > now,
+        )
+        .values(lease_expires_at=expires, version=TaskRow.version + 1, updated_at=utcnow())
+    )
+    if task.rowcount != 1:
+        session.rollback()
+        return None
+    attempt = session.execute(
+        update(TaskAttemptRow)
+        .where(
+            TaskAttemptRow.id == claim.attempt_id,
+            TaskAttemptRow.fencing_token == claim.fencing_token,
+            TaskAttemptRow.lease_owner == claim.lease_owner,
+            TaskAttemptRow.finished_at.is_(None),
+        )
+        .values(lease_expires_at=expires)
+    )
+    if attempt.rowcount != 1:
+        session.rollback()
+        return None
+    return expires
 
 
 def _load(session: Session, task_id: str, *, skip_locked: bool) -> TaskRow:

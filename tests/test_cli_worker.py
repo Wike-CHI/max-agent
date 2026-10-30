@@ -117,34 +117,50 @@ def test_run_bounded_timeout_and_cancel_stop_the_process_group(tmp_path: Path) -
 
 def test_exec_argv_keeps_prompt_as_one_argument_and_refuses_yolo() -> None:
     prompt = 'implement add; $(touch /tmp/pwned)'
+    workspace = Path("/tmp/max-agent-workspaces/demo/work")
+    prompt_file = workspace / ".max-agent" / "prompt.txt"
     grok = build_exec_argv(
         "grok",
         binary="/usr/bin/grok",
-        workspace=Path("/tmp/max-agent-workspaces/demo/work"),
+        workspace=workspace,
         prompt=prompt,
-        prompt_file=Path("/tmp/max-agent-workspaces/demo/work/.max-agent/prompt.txt"),
+        prompt_file=prompt_file,
     )
     codex = build_exec_argv(
         "codex",
         binary="/usr/bin/codex",
-        workspace=Path("/tmp/max-agent-workspaces/demo/work"),
+        workspace=workspace,
         prompt=prompt,
-        prompt_file=Path("/tmp/max-agent-workspaces/demo/work/.max-agent/prompt.txt"),
+        prompt_file=prompt_file,
+    )
+    claude = build_exec_argv(
+        "claude",
+        binary="/usr/bin/claude",
+        workspace=workspace,
+        prompt=prompt,
+        prompt_file=prompt_file,
     )
     assert prompt in grok
     assert prompt in codex
+    assert prompt in claude
     assert "--sandbox" in grok and "strict" in grok
     assert "exec" in codex and "workspace-write" in codex
+    assert claude[claude.index("--permission-mode") + 1] == "acceptEdits"
+    assert claude[claude.index("--output-format") + 1] == "json"
+    assert claude[claude.index("-p") + 1] == prompt
     assert FORBIDDEN_CLI_FLAGS.isdisjoint(grok)
     assert FORBIDDEN_CLI_FLAGS.isdisjoint(codex)
+    assert FORBIDDEN_CLI_FLAGS.isdisjoint(claude)
     assert "--yolo" not in grok
     assert "danger-full-access" not in codex
+    assert "--allow-dangerously-skip-permissions" in FORBIDDEN_CLI_FLAGS
 
 
-def test_choose_vendor_skips_real_cli_without_authorization() -> None:
+def test_choose_vendor_authorization_and_auto_preference() -> None:
     probes = [
         Probe(vendor="grok", available=True, enabled=False, reason="not_authorized"),
         Probe(vendor="codex", available=False, enabled=False, reason="not_on_path"),
+        Probe(vendor="claude", available=False, enabled=False, reason="not_on_path"),
     ]
     vendor, failure = choose_vendor("auto", probes, authorized=False)
     assert vendor == "stub"
@@ -154,10 +170,13 @@ def test_choose_vendor_skips_real_cli_without_authorization() -> None:
     enabled = [
         Probe(vendor="grok", available=True, enabled=True, reason="ok"),
         Probe(vendor="codex", available=True, enabled=True, reason="ok"),
+        Probe(vendor="claude", available=True, enabled=True, reason="ok"),
     ]
-    vendor, failure = choose_vendor("auto", enabled, authorized=True)
-    assert vendor == "grok"
-    assert failure is None
+    assert choose_vendor("auto", enabled, authorized=True) == ("grok", None)
+    assert choose_vendor("auto", enabled[1:], authorized=True) == ("codex", None)
+    assert choose_vendor("auto", enabled[2:], authorized=True) == ("claude", None)
+    failed_probe = [Probe(vendor="claude", available=True, enabled=False, reason="version_probe_failed")]
+    assert choose_vendor("claude", failed_probe, authorized=True) == ("claude", "cli_unavailable")
 
 
 def test_fixture_issue_passes_with_stub_and_archives_artifacts(session, tmp_path: Path, monkeypatch) -> None:
@@ -219,20 +238,23 @@ def test_switching_worker_keeps_task_identity(session, tmp_path: Path) -> None:
     assert created_event.payload["worker_kind"] == "mock"
 
 
-def test_unauthorized_grok_is_not_executed(session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("vendor", ["grok", "claude"])
+def test_unauthorized_real_cli_is_not_executed(
+    vendor: str, session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    binary = bin_dir / "grok"
+    binary = bin_dir / vendor
     binary.write_text(
-        "#!/bin/sh\nprintf grok > marker\n",
+        "#!/bin/sh\nprintf called > marker\n",
         encoding="utf-8",
     )
     binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     _created, out = _run(
         session,
-        "do not call grok",
-        {"vendor": "grok", "workspace_root": str(tmp_path / "ws")},
+        f"do not call {vendor}",
+        {"vendor": vendor, "workspace_root": str(tmp_path / "ws")},
         criteria=["worker_ok"],
     )
     assert out.status == TaskStatus.FAILED
@@ -291,6 +313,64 @@ raise SystemExit(0)
     assert outputs["vendor"] == "grok"
     assert outputs["real_cli_invoked"] is True
     assert "xai-LIVEKEY123456" not in json.dumps(outputs)
+    assert FORBIDDEN_CLI_FLAGS.isdisjoint(outputs["argv"])
+
+
+def test_authorized_claude_runs_after_version_probe_with_scoped_credentials(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = bin_dir / "claude.log"
+    script = bin_dir / "claude"
+    script.write_text(
+        f"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+log = Path({str(log)!r})
+rows = json.loads(log.read_text()) if log.exists() else []
+rows.append({{
+    "argv": sys.argv[1:],
+    "has_anthropic": "ANTHROPIC_API_KEY" in os.environ,
+    "has_xai": "XAI_API_KEY" in os.environ,
+    "has_github": "GITHUB_TOKEN" in os.environ,
+}})
+log.write_text(json.dumps(rows))
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("fake-claude 0")
+    raise SystemExit(0)
+Path.cwd().joinpath("calc.py").write_text("def add(a: int, b: int) -> int:\\n    return a + b\\n")
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-LIVEKEY123456")
+    monkeypatch.setenv("XAI_API_KEY", "xai-LIVEKEY123456")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_LIVEKEY12345678")
+    _created, out = _run(
+        session,
+        "Implement add() with authorized claude",
+        {"vendor": "claude", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    rows = json.loads(log.read_text(encoding="utf-8"))
+    assert len(rows) == 2
+    assert rows[0]["argv"] == ["--version"]
+    assert rows[0]["has_anthropic"] is False
+    exec_row = rows[1]
+    assert exec_row["argv"][:5] == ["--permission-mode", "acceptEdits", "--output-format", "json", "-p"]
+    assert exec_row["has_anthropic"] is True
+    assert exec_row["has_xai"] is False
+    assert exec_row["has_github"] is False
+    outputs = _outputs(session, out.id)
+    assert outputs["vendor"] == "claude"
+    assert outputs["real_cli_invoked"] is True
+    assert "sk-ant-LIVEKEY123456" not in json.dumps(outputs)
     assert FORBIDDEN_CLI_FLAGS.isdisjoint(outputs["argv"])
 
 
