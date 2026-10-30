@@ -46,11 +46,25 @@ pg_restore --clean --if-exists --dbname=postgresql://USER@HOST:5432/DBNAME backu
 
 `build_pg_dump_command` in `max_agent.ops.backup` builds that argv and puts the password only in the environment.
 
-## Live drill
+## Live drill and archived evidence
 
-Set `MAX_AGENT_PG_DRILL` to a disposable Postgres URL (database name contains `drill` or `test`) and install a SQLAlchemy driver such as `psycopg`. The default test run skips this path and says so. Do not point the drill at a database you need to keep: it downgrades the latest revision, deletes rows, and restores the snapshot.
+Set `MAX_AGENT_PG_DRILL` to a disposable Postgres URL whose database name contains `drill` or `test`. Install the locked optional driver, then run the evidence runner:
+
+```bash
+uv sync --locked --extra dev --extra postgres
+MAX_AGENT_PG_DRILL=postgresql://max@localhost:5432/max_agent_drill \
+  uv run --no-sync --extra postgres python scripts/postgres_restore_drill.py
+```
+
+The default output is `docs/operations/evidence/postgres-restore-YYYY-MM-DD.json`; use `--output PATH` to choose another file. The evidence contains the source revision, event counts, lost-event list, and pass/fail status, but never the database URL or password. A nonzero exit means the live drill failed.
+
+Do not point the drill at a database you need to keep: it downgrades the latest revision, deletes rows, and restores the snapshot. When `MAX_AGENT_PG_DRILL` is unset, the runner archives `status: skipped` and exits successfully; this is not evidence of a Postgres pass.
+
+The same live path is available through the opt-in test:
 
 ```bash
 MAX_AGENT_PG_DRILL=postgresql://max@localhost:5432/max_agent_drill \
-  uv run --no-sync pytest -q tests/test_backup_restore.py::test_live_postgres_drill
+  uv run --no-sync --extra postgres pytest -q tests/test_backup_restore.py::test_live_postgres_drill
 ```
+
+Current evidence: [postgres-restore-2026-10-30.json](evidence/postgres-restore-2026-10-30.json). It records a skip because this environment has no configured or reachable Postgres service. The v1.0 gate requires replacing it with a real passing result.
