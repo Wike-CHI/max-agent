@@ -22,7 +22,7 @@ uv sync --extra dev
 ```bash
 export MAX_AGENT_DB_PATH=/workspace/max-agent/data/max_agent.db
 uv run max-agent init-db
-# optional migrations:
+# required for an existing DB; includes task ownership:
 uv run alembic upgrade head
 ```
 
@@ -100,26 +100,38 @@ uv run max-agent mcp   # stdio JSON-RPC: initialize, tools/list, tools/call
 
 ## HTTP API
 
+Set a strong API token before starting the server. Protected routes fail closed with 401 when it is missing or invalid.
+
 ```bash
+export MAX_AGENT_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export MAX_AGENT_API_ACTOR=user  # optional; default: user
+uv run alembic upgrade head       # existing DB: adds task ownership
 uv run max-agent serve --host 127.0.0.1 --port 8080
-# GET  /v1/health                 # liveness: process up, version
-# GET  /v1/ready                  # readiness: SELECT 1
-# GET  /v1/telemetry              # in-process HTTP spans and counters
+
+curl -H "Authorization: Bearer $MAX_AGENT_API_TOKEN" http://127.0.0.1:8080/v1/tasks
+# GET  /v1/health                 # anonymous liveness: process up, version
+# GET  /v1/ready                  # anonymous readiness: SELECT 1
+# GET  /v1/telemetry              # authenticated in-process spans and counters
 # POST /v1/tasks
+# GET  /v1/tasks                  # only tasks owned by the authenticated principal
 # GET  /v1/tasks/{id}
-# GET  /v1/tasks/{id}/status          # same envelope as `max-agent --json status`
+# GET  /v1/tasks/{id}/status      # same envelope as `max-agent --json status`
 # POST /v1/tasks/{id}/schedule
 # POST /v1/tasks/{id}/cancel
-# POST /v1/tasks/graph                # {"nodes":[{"key":"a","goal":"...","depends_on":[]}]}
-# POST /v1/queue/run?limit=50
-# POST /v1/tasks/{id}/approve         # {"actor":"user","note":"...","scope":[],"ttl_seconds":null}
-# POST /v1/tasks/{id}/reject          # {"actor":"user","note":"..."}
+# POST /v1/tasks/graph            # {"nodes":[{"key":"a","goal":"...","depends_on":[]}]}
+# POST /v1/queue/run?limit=50     # only runs the principal's tasks
+# POST /v1/tasks/{id}/approve     # {"note":"...","scope":[],"ttl_seconds":null}
+# POST /v1/tasks/{id}/reject      # {"note":"..."}
 # GET  /v1/tasks/{id}/events
-# GET  /v1/tasks/{id}/trace           # issue -> worker -> verification -> pull request
-# GET  /v1/metrics                     # verified_task_rate, cost_per_verified_task, retry_overhead
-# POST /v1/aer/retry                   # redeliver failed AER exports; does not run tasks
-# POST /v1/inbound/webhook            # signed Routine/webhook create; returns task_id
+# GET  /v1/tasks/{id}/trace       # issue -> worker -> verification -> pull request
+# GET  /v1/metrics                # authenticated economics report
+# POST /v1/aer/retry              # authenticated; does not run tasks
+# POST /v1/inbound/webhook        # signed Routine/webhook create; returns task_id
 ```
+
+Every task read/write, queue operation, telemetry, metrics, and AER retry request needs `Authorization: Bearer <token>`; only health/readiness and the independently signed webhook are exempt. The token principal comes from `MAX_AGENT_API_ACTOR` and is stored as `created_by`. Only that principal can read, schedule, cancel, approve, or reject the task. `actor` is optional in approval bodies for compatibility, but a value that differs from the principal returns 403; the recorded actor always comes from authentication. Migration assigns existing rows to `user`.
+
+**Do not expose the HTTP API publicly without authentication.** Keep it on loopback or a private network until `MAX_AGENT_API_TOKEN` is configured. Remote access also requires TLS or a private tunnel so the bearer token is not sent in cleartext. This is a single-user token boundary, not multi-tenant IAM; OIDC and token rotation remain future work.
 
 Webhook requests need `MAX_AGENT_WEBHOOK_SECRET` plus headers `X-Max-Timestamp`, `X-Max-Signature` (hex HMAC-SHA256 of `{timestamp}.{raw_body}`), and `X-Max-Delivery-Id`. Replays of the same delivery id return the original task. A new delivery with the same `idempotency_key` attaches to that task and does not start a second one. The handler does not run the worker.
 

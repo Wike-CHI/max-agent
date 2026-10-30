@@ -10,7 +10,7 @@ SQLite remains the default for local runs and CI. PostgreSQL is the concurrent r
 4. On failure, stop writers, then either roll the schema back or restore the backup. Read that revision's `downgrade()` first. A downgrade that only drops new columns can keep `task_events`. A downgrade that drops tables cannot. When in doubt, restore the backup.
 5. Re-run the drill and confirm event fingerprints match.
 
-The fixture drill runs `alembic downgrade -1` and then upgrades again. On this branch that revision drops approval columns on `tasks` and does not delete `task_events`. The drill asserts the events are still there.
+The fixture drill runs `alembic downgrade -1` and then upgrades again. On this branch that revision drops the `created_by` ownership column and its index from `tasks` and does not delete `task_events`. The drill asserts the events are still there. Reapplying the migration assigns existing rows to the default `user` principal.
 
 ## Logical snapshot (no pg_dump required)
 

@@ -32,10 +32,12 @@ class TaskRow(Base):
         UniqueConstraint("idempotency_key", name="uq_tasks_idempotency_key"),
         Index("ix_tasks_status_priority", "status", "priority"),
         Index("ix_tasks_status_lease", "status", "lease_expires_at"),
+        Index("ix_tasks_created_by", "created_by"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     goal: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False, default="user", server_default="user")
     acceptance_criteria: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     dependencies: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)

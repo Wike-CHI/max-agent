@@ -23,7 +23,7 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch):
     reset_engine()
     reset_telemetry()
     init_db(url)
-    with TestClient(create_app()) as test_client:
+    with TestClient(create_app(), headers={"Authorization": "Bearer test-api-token"}) as test_client:
         yield test_client
     reset_engine()
     reset_telemetry()
