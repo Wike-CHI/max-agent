@@ -35,8 +35,9 @@ uv run max-agent create "echo hello" \
   -w mock --payload '{"mode":"success","answer":"hello"}' \
   -k demo-1
 
-# Run it
+# Run one attempt manually, or leave execution to the long-running daemon
 uv run max-agent run <TASK_ID>
+uv run max-agent worker --concurrency 2 --poll-interval 1 --lease-ttl 600
 
 # After a crash, expired leases are requeued. Side effects without an
 # idempotency key stay blocked until --confirm-side-effects.

@@ -240,6 +240,54 @@ def run_queue_cmd(
     _print(tasks)
 
 
+@app.command("worker")
+def worker_cmd(
+    ctx: typer.Context,
+    concurrency: int = typer.Option(1, "--concurrency", "-c", min=1, help="Maximum tasks run by this process"),
+    poll_interval: float = typer.Option(1.0, "--poll-interval", min=0.01, help="Initial empty-queue delay"),
+    max_poll_interval: float = typer.Option(30.0, "--max-poll-interval", min=0.01, help="Empty-queue backoff cap"),
+    lease_ttl: int = typer.Option(600, "--lease-ttl", min=1, help="Lease lifetime in seconds"),
+    heartbeat_interval: Optional[float] = typer.Option(
+        None,
+        "--heartbeat-interval",
+        min=0.01,
+        help="Lease renewal interval; defaults to one third of lease TTL",
+    ),
+    worker_id: Optional[str] = typer.Option(None, "--worker-id", help="Stable lease owner; defaults to a unique process id"),
+    created_by: Optional[str] = typer.Option(None, "--created-by", help="Only claim tasks owned by this principal"),
+) -> None:
+    """Continuously claim and execute ready tasks until SIGTERM or SIGINT."""
+    import os
+    import socket
+    import uuid
+
+    from max_agent.workers.daemon import WorkerDaemon, configure_worker_logging
+
+    heartbeat = heartbeat_interval if heartbeat_interval is not None else lease_ttl / 3
+    if heartbeat >= lease_ttl:
+        _fail(ctx, "worker", "heartbeat interval must be shorter than lease TTL")
+    identity = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    try:
+        scheduler = Scheduler(
+            worker_id=identity,
+            lease_ttl_seconds=lease_ttl,
+            heartbeat_interval_seconds=heartbeat,
+            max_concurrency=concurrency,
+            created_by=created_by,
+        )
+        daemon = WorkerDaemon(
+            scheduler,
+            concurrency=concurrency,
+            poll_interval_seconds=poll_interval,
+            max_poll_interval_seconds=max_poll_interval,
+            error_backoff_cap_seconds=max_poll_interval,
+        )
+    except ValueError as exc:
+        _fail(ctx, "worker", str(exc))
+    configure_worker_logging()
+    daemon.run()
+
+
 @app.command("recover")
 def recover_cmd(ctx: typer.Context) -> None:
     """Requeue or block tasks whose lease expired. Use after a process restart."""

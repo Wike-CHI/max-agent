@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -11,10 +12,11 @@ from sqlalchemy.dialects import postgresql, sqlite
 from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
 from max_agent.db.session import get_session_factory, session_scope
 from max_agent.kernel.errors import LeaseHeldError, StaleFenceError
-from max_agent.kernel.lease import select_task_for_claim
+from max_agent.kernel.lease import renew_lease_in_session, select_task_for_claim
 from max_agent.kernel.retry import backoff_delay_seconds
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
+from max_agent.kernel.timeutil import as_utc
 from max_agent.models.enums import FailureClass, TaskStatus, WorkerKind
 from max_agent.models.schemas import BudgetConstraints, ScheduleRequest, TaskCreate, WorkerResult
 from max_agent.workers.base import Worker, WorkerContext
@@ -139,6 +141,82 @@ def test_duplicate_schedule_only_one_worker_runs(db_url: str):
         assert row is not None
         assert row.status == TaskStatus.SUCCEEDED.value
         assert row.fencing_token == 1
+
+
+def test_lease_renewal_extends_only_current_unexpired_attempt(db_url: str):
+    task_id = _create(
+        db_url,
+        goal="renew",
+        acceptance_criteria=["worker_ok"],
+        worker_kind=WorkerKind.MOCK,
+    )
+    claim = Scheduler(session_factory=_factory(db_url), worker_id="owner").acquire_lease(task_id)
+    renewed_at = claim.lease_expires_at - timedelta(seconds=1)
+
+    with session_scope(db_url) as session:
+        expires = renew_lease_in_session(session, claim, now=renewed_at, ttl_seconds=600)
+        assert expires is not None
+        assert expires > claim.lease_expires_at
+
+    with session_scope(db_url) as session:
+        row = session.get(TaskRow, task_id)
+        attempt = session.get(TaskAttemptRow, claim.attempt_id)
+        assert row is not None and attempt is not None
+        assert as_utc(row.lease_expires_at) == expires
+        assert as_utc(attempt.lease_expires_at) == expires
+        stale = replace(claim, fencing_token=claim.fencing_token + 1)
+        assert renew_lease_in_session(session, stale, now=renewed_at, ttl_seconds=600) is None
+        assert renew_lease_in_session(session, claim, now=expires, ttl_seconds=600) is None
+
+
+def test_scheduler_heartbeat_renews_while_worker_is_blocked(db_url: str):
+    class ObservedScheduler(Scheduler):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.renewed = threading.Event()
+
+        def renew_lease(self, claim):
+            renewed = super().renew_lease(claim)
+            if renewed:
+                self.renewed.set()
+            return renewed
+
+    task_id = _create(
+        db_url,
+        goal="heartbeat",
+        acceptance_criteria=["worker_ok"],
+        worker_kind=WorkerKind.MOCK,
+    )
+    worker = _BlockWorker()
+    scheduler = ObservedScheduler(
+        session_factory=_factory(db_url),
+        worker_id="heartbeat-owner",
+        worker_resolver=lambda _kind: worker,
+        lease_ttl_seconds=60,
+        heartbeat_interval_seconds=0.01,
+    )
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            scheduler.run_one(task_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert worker.entered.wait(5)
+        assert scheduler.renewed.wait(5)
+    finally:
+        worker.release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert not errors
+    with session_scope(db_url) as session:
+        row = session.get(TaskRow, task_id)
+        assert row is not None
+        assert row.status == TaskStatus.SUCCEEDED.value
 
 
 def test_expired_lease_reclaim_rejects_stale_finalize(db_url: str):
