@@ -12,7 +12,7 @@ Recorded run: [evidence/grok-e2e-2026-10-30.md](evidence/grok-e2e-2026-10-30.md)
 - [ ] Use only mock work for the basic entry-point checks. An `external_write` approval on a mock task does not authorize a real external write.
 - [ ] Leave `MAX_AGENT_ALLOW_EXTERNAL_CLI` unset for the initial CLI-worker stub check.
 - [ ] Only an operator may enable `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` for a deliberate vendor probe. Never set it in `docs/skills/grok-max-entry/SKILL.md` or in the Grok Bot skill itself.
-- [ ] Do not install a fake `grok`/`codex` executable. A stub or `auto` fallback is not real external-CLI acceptance.
+- [ ] Do not install a fake `grok`/`codex`/`claude` executable. A stub or `auto` fallback is not real external-CLI acceptance.
 - [ ] Do not run a polling loop. `create` and webhook return immediately; one `run` invocation performs one worker attempt; query `status` and `events` on demand.
 - [ ] Stop the loopback server and unset the external gate and secrets when finished.
 
@@ -28,7 +28,7 @@ export MAX_AGENT_DATABASE_URL=sqlite:////tmp/max-agent-grok-e2e.db
 export MAX_AGENT_API_TOKEN="$(uv run --no-sync python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export MAX_AGENT_API_ACTOR=user
 export MAX_AGENT_WEBHOOK_SECRET="$(uv run --no-sync python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-unset MAX_AGENT_ALLOW_EXTERNAL_CLI XAI_API_KEY OPENAI_API_KEY
+unset MAX_AGENT_ALLOW_EXTERNAL_CLI XAI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY
 mkdir -p /tmp/max-agent-grok-e2e-evidence
 ```
 
@@ -201,7 +201,10 @@ Only now may the **operator**, outside the Grok skill, enable the external gate 
 export MAX_AGENT_ALLOW_EXTERNAL_CLI=1
 command -v grok || true
 command -v codex || true
+command -v claude || true
 ```
+
+Claude Code is supported under the same operator-only gate and uses `ANTHROPIC_API_KEY`. Authorized `auto` probes and selects vendors in this order: Grok → Codex → Claude.
 
 Repeat create/run/status/events with unique idempotency keys and one of these payloads at a time:
 
@@ -209,6 +212,7 @@ Repeat create/run/status/events with unique idempotency keys and one of these pa
 {"vendor":"auto","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}
 {"vendor":"grok","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}
 {"vendor":"codex","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}
+{"vendor":"claude","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}
 ```
 
 Interpret the result honestly:
@@ -221,7 +225,7 @@ Interpret the result honestly:
 After probing:
 
 ```bash
-unset MAX_AGENT_ALLOW_EXTERNAL_CLI MAX_AGENT_API_TOKEN MAX_AGENT_WEBHOOK_SECRET
+unset MAX_AGENT_ALLOW_EXTERNAL_CLI MAX_AGENT_API_TOKEN MAX_AGENT_WEBHOOK_SECRET XAI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY
 ```
 
 ## 7. Evidence and residual-risk checklist

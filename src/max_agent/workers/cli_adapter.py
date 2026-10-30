@@ -3,7 +3,7 @@
 Contract version 1. Inputs come from WorkerContext (goal, acceptance, timeout)
 and worker_payload:
 
-- vendor: auto | stub | grok | codex
+- vendor: auto | stub | grok | codex | claude
 - workspace_root: directory under /tmp (or MAX_AGENT_WORKSPACE_ROOT)
 - repo_path: optional tree to copy; the source checkout is not edited
 - cancel_file: touched by the caller to SIGTERM the child
@@ -12,13 +12,16 @@ and worker_payload:
 
 Outputs (also archived as `.max-agent/manifest.json`) include adapter_version,
 vendor, exit_code, stdout, stderr, timed_out, cancelled, adapter_failure,
-artifact inventory, and argv. Real Grok Build / Codex processes start only when
-`MAX_AGENT_ALLOW_EXTERNAL_CLI=1` and `grok version` / `codex --version` exits 0.
-Otherwise the run uses the local stub or returns a classified skip.
+artifact inventory, and argv. Real Grok Build / Codex / Claude Code processes
+start only when `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` and `grok version` /
+`codex --version` / `claude --version` exits 0. Otherwise the run uses the local
+stub or returns a classified skip. Authorized `auto` prefers Grok, then Codex,
+then Claude.
 
 Grok is invoked as headless `-p` with `--sandbox strict` (no `--yolo`).
 Codex is invoked as `exec --sandbox workspace-write` (no `danger-full-access`).
-Neither flag set is a VM boundary. See docs/limitations.md.
+Claude is invoked as headless `-p` with `--permission-mode acceptEdits`.
+No flag set is a VM boundary. See docs/limitations.md.
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ FORBIDDEN_CLI_FLAGS = frozenset(
     {
         "--yolo",
         "--always-approve",
+        "--allow-dangerously-skip-permissions",
         "--dangerously-bypass-approvals-and-sandbox",
         "--dangerously-skip-permissions",
         "danger-full-access",
@@ -64,9 +68,14 @@ FORBIDDEN_CLI_FLAGS = frozenset(
 _NON_RECOVERABLE = frozenset(
     {"cli_not_authorized", "cli_unavailable", "path_violation", "worktree_failed"}
 )
-_VENDOR_BINARY = {"grok": "grok", "codex": "codex"}
-_VENDOR_VERSION = {"grok": ("version",), "codex": ("--version",)}
-_VENDOR_PASSTHROUGH = {"grok": ("XAI_API_KEY",), "codex": ("OPENAI_API_KEY",)}
+_VENDOR_ORDER = ("grok", "codex", "claude")
+_VENDOR_BINARY = {"grok": "grok", "codex": "codex", "claude": "claude"}
+_VENDOR_VERSION = {"grok": ("version",), "codex": ("--version",), "claude": ("--version",)}
+_VENDOR_PASSTHROUGH = {
+    "grok": ("XAI_API_KEY",),
+    "codex": ("OPENAI_API_KEY",),
+    "claude": ("ANTHROPIC_API_KEY",),
+}
 
 
 @dataclass(frozen=True)
@@ -88,11 +97,11 @@ def cli_workspace_roots() -> tuple[Path, ...]:
 
 
 def choose_vendor(requested: str, probes: list[Probe], authorized: bool) -> tuple[str, str | None]:
-    """Pick a vendor. `auto` uses a probed real CLI only when authorized."""
+    """Pick a vendor. Authorized `auto` prefers Grok, Codex, then Claude."""
     by_name = {probe.vendor: probe for probe in probes}
     if requested == "auto":
         if authorized:
-            for name in ("grok", "codex"):
+            for name in _VENDOR_ORDER:
                 probe = by_name.get(name)
                 if probe is not None and probe.enabled:
                     return name, None
@@ -156,6 +165,16 @@ def build_exec_argv(
             str(workspace / ".max-agent" / "cli-last-message.txt"),
             prompt,
         ]
+    elif vendor == "claude":
+        argv = [
+            binary,
+            "--permission-mode",
+            "acceptEdits",
+            "--output-format",
+            "json",
+            "-p",
+            prompt,
+        ]
     else:
         raise ValueError(f"no real CLI argv for vendor {vendor}")
     blocked = FORBIDDEN_CLI_FLAGS.intersection(argv)
@@ -167,7 +186,7 @@ def build_exec_argv(
 def probe_vendors(environ: dict[str, str] | None = None) -> list[Probe]:
     env = os.environ if environ is None else environ
     authorized = env.get(ALLOW_ENV) == "1"
-    return [_probe_one(name, authorized=authorized) for name in ("grok", "codex")]
+    return [_probe_one(name, authorized=authorized) for name in _VENDOR_ORDER]
 
 
 class CliWorker(Worker):
