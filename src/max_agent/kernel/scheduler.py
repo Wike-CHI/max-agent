@@ -6,6 +6,8 @@ LeaseManager cannot survive process death, so it is not consulted here.
 
 from __future__ import annotations
 
+import logging
+import threading
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Iterator
@@ -17,12 +19,20 @@ from max_agent.db.models import TaskRow, utcnow
 from max_agent.db.session import get_session_factory
 from max_agent.kernel.errors import ConcurrencyLimitError, LeaseHeldError
 from max_agent.kernel.execution import execute_claim, finalize_in_session
-from max_agent.kernel.lease import AttemptClaim, claim_in_session, recover_expired_in_session
+from max_agent.kernel.lease import (
+    AttemptClaim,
+    claim_in_session,
+    recover_expired_in_session,
+    renew_lease_in_session,
+)
 from max_agent.kernel.queue import QueuePolicy, pick_next
 from max_agent.kernel.readmodel import task_to_read
-from max_agent.models.enums import TaskStatus, WorkerKind
+from max_agent.models.enums import FailureClass, TaskStatus, WorkerKind
 from max_agent.models.schemas import ScheduleRequest, TaskRead
+from max_agent.ops.telemetry import get_telemetry
 from max_agent.workers.base import Worker
+
+logger = logging.getLogger(__name__)
 
 
 class LeaseManager:
@@ -82,6 +92,7 @@ class Scheduler:
         starve_after_seconds: float = 3600.0,
         fairness_step: int = 10,
         created_by: str | None = None,
+        heartbeat_interval_seconds: float | None = None,
     ) -> None:
         self._external = session
         self.created_by = created_by
@@ -99,6 +110,9 @@ class Scheduler:
         self.backoff_base_seconds = backoff_base_seconds
         self.backoff_cap_seconds = backoff_cap_seconds
         self.worker_resolver = worker_resolver
+        if heartbeat_interval_seconds is not None and heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat_interval_seconds must be > 0")
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
         self.policy = QueuePolicy(
@@ -163,6 +177,65 @@ class Scheduler:
         if not isinstance(outcome, AttemptClaim):
             raise ValueError(f"task {task_id} was not claimed (status={outcome.status})")
         return outcome
+
+    def renew_lease(self, claim: AttemptClaim) -> bool:
+        """Extend a live lease only while its owner and fencing token remain current."""
+        with self._transaction() as session:
+            expires = renew_lease_in_session(
+                session,
+                claim,
+                now=utcnow(),
+                ttl_seconds=self.lease_ttl_seconds,
+            )
+        get_telemetry().counter("worker.lease.renewed" if expires is not None else "worker.lease.lost")
+        return expires is not None
+
+    def _execute_with_heartbeat(self, claim: AttemptClaim) -> tuple[WorkerResult, FailureClass | None]:
+        if self.heartbeat_interval_seconds is None:
+            return execute_claim(
+                claim,
+                session_factory=self.session_factory,
+                worker_resolver=self.worker_resolver,
+            )
+
+        stopped = threading.Event()
+
+        def heartbeat() -> None:
+            while not stopped.wait(self.heartbeat_interval_seconds):
+                try:
+                    if not self.renew_lease(claim):
+                        logger.warning(
+                            "lease renewal rejected for task %s attempt %s",
+                            claim.task_id,
+                            claim.attempt_id,
+                            extra={"task_id": claim.task_id, "attempt_id": claim.attempt_id},
+                        )
+                        return
+                except Exception as exc:
+                    get_telemetry().counter("worker.lease.errors")
+                    logger.error(
+                        "lease renewal failed for task %s attempt %s: %s",
+                        claim.task_id,
+                        claim.attempt_id,
+                        exc,
+                        extra={"task_id": claim.task_id, "attempt_id": claim.attempt_id},
+                    )
+
+        thread = threading.Thread(
+            target=heartbeat,
+            name=f"max-agent-heartbeat-{claim.task_id[:8]}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            return execute_claim(
+                claim,
+                session_factory=self.session_factory,
+                worker_resolver=self.worker_resolver,
+            )
+        finally:
+            stopped.set()
+            thread.join()
 
     def finalize_lease(self, claim: AttemptClaim, result: WorkerResult) -> TaskRead:
         """Commit the outcome if `claim.fencing_token` is still current."""
@@ -245,11 +318,7 @@ class Scheduler:
             )
         if not isinstance(outcome, AttemptClaim):
             return outcome
-        result, hint = execute_claim(
-            outcome,
-            session_factory=self.session_factory,
-            worker_resolver=self.worker_resolver,
-        )
+        result, hint = self._execute_with_heartbeat(outcome)
         with self._transaction() as session:
             return finalize_in_session(
                 session,
