@@ -27,7 +27,7 @@ The project has moved beyond the original MVP. Current master includes:
 - Execution Journal, AER evidence exports, cost telemetry, API token authentication, and task-level authorization (#6, #19).
 - CI, release artifacts, checksums/provenance, dependency and deployment gates, and SQLite restore coverage (#2, #8).
 
-This is **not a production-grade v1.0 announcement**. The `max-worker` daemon remains open in #21, and the archived live Postgres restore drill is currently an honest skip rather than a pass.
+This is **not a production-grade v1.0 announcement**. The `max-worker` daemon remains open in #21; the archived live Postgres restore drill now passes with no lost events.
 
 ## Milestones (outcome-based, not date-driven)
 
@@ -36,7 +36,7 @@ This is **not a production-grade v1.0 announcement**. The `max-worker` daemon re
 | **v0.2 — Delivery + Entry** | Grok Bot creates/runs/gets a safe Task; engineering changes flow via Issue → PR → CI | #2, #5 | Complete | CI passes on Python 3.12/3.13; Task ID and verified result returned |
 | **v0.3 — Durable execution** | Recover a leased Task after worker interruption without duplicate external effects | #3 | Complete | Concurrency, expiry, crash-recovery tests, and idempotency policy |
 | **v0.4 — Real coding Worker** | Authorized CLI worker changes an isolated worktree and verifies the result | #4, #26 | Complete | Secret redaction, timeout/cancel handling, and archived artifacts |
-| **v0.5 — Orchestration + Economics** | DAG, approvals, AER traces, authentication, release gates, and measured execution cost | #6, #7, #8, #19, #20 | Pre-release candidate | v0.5.0 artifacts and pre-release flow verified; live Postgres pass still pending |
+| **v0.5 — Orchestration + Economics** | DAG, approvals, AER traces, authentication, release gates, and measured execution cost | #6, #7, #8, #19, #20 | Pre-release candidate | v0.5.0 artifacts and pre-release flow verified; live Postgres pass archived |
 | **v1.0 — Portable runtime** | Supervised worker operation and a versioned, restorable Postgres deployment | #1, #8, #21 | Not released | All v1.0 exit criteria below pass with evidence and human approval |
 
 Issue #8 delivered engineering and operational gates; it did not deploy a production service. Issue #20's evidence is archived at [docs/operations/evidence/grok-e2e-2026-10-30.md](operations/evidence/grok-e2e-2026-10-30.md). Issue #21 is **open**, not merged.
@@ -71,7 +71,7 @@ A v1.0 tag is allowed only when all of these conditions are met:
 
 ## Prioritization rationale
 
-Finish supervised worker recovery and real Postgres evidence before considering v1.0. Introduce expensive model routing only when measurable outcomes exist. A UI/dashboard is optional until the task and evidence APIs stabilize.
+Finish supervised worker recovery and the remaining release gates before considering v1.0. Introduce expensive model routing only when measurable outcomes exist. A UI/dashboard is optional until the task and evidence APIs stabilize.
 
 ## Explicit non-goals
 
