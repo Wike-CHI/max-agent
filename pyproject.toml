@@ -1,7 +1,7 @@
 [project]
 name = "max-agent"
-version = "0.1.0"
-description = "Task-centric personal agent scheduler kernel (MAX-Agent MVP)"
+version = "0.5.0"
+description = "Task-centric personal agent scheduler kernel"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "wike 叶维哲" }]
@@ -20,6 +20,9 @@ dependencies = [
 dev = [
   "pytest>=8.3.0",
   "pytest-asyncio>=0.24.0",
+]
+postgres = [
+  "psycopg[binary]>=3.2.0",
 ]
 
 [project.scripts]
