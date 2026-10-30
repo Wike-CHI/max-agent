@@ -12,6 +12,7 @@
 8. **敏感操作**：`waiting_approval` 记录审批人、范围和过期时间。没有 Slack/邮件工单，也没有真实支付或发布。取消不能杀掉已经在跑的线程；不可逆工具要在动作前走内核边界。
 9. **Alembic**：已配置；MVP 也可 `init_db()` 直接 `create_all`（测试与 CLI 默认路径）。
 10. **成本**：只记录 worker 明确给出的 `measured` / `estimate`。没有报告时是 `unknown`，不会填 0，也不会调用付费 API 去补数。进程内 traces/metrics 在 `/v1/telemetry`。`MAX_AGENT_OTEL=1` 时桥接 OpenTelemetry API；未配置 collector，缺导出器不会让请求失败。
+11. **HTTP 身份是单用户 Token**：`MAX_AGENT_API_TOKEN` 保护任务、telemetry、metrics 和写接口，`MAX_AGENT_API_ACTOR` 是任务所有者与审批人。没有 OIDC、完整多租户 IAM 或自动 token rotation；远程接入必须使用 TLS 或私有隧道，未配置认证时只能放在 loopback / 私有网络。
 
 ## 下一阶段建议
 

@@ -12,8 +12,8 @@ These targets are for a single-operator runtime over a 30 day window. They are n
 
 `/v1/ready` runs `SELECT 1`. Failure is HTTP 503 with `detail` set to `database unavailable`. The body does not include the driver error, the database URL, or secret values.
 
-`/v1/telemetry` returns in-process counters and the latest HTTP spans (`http.server.requests`, span name `http.request`). Spans store the method and path, not headers or the query string.
+`/v1/telemetry` returns in-process counters and the latest HTTP spans (`http.server.requests`, span name `http.request`). Spans store the method and path, not headers or the query string. Telemetry requires the same `Authorization: Bearer <MAX_AGENT_API_TOKEN>` credential as task APIs; health and readiness remain anonymous.
 
-Set `MAX_AGENT_OTEL=1` to also open an OpenTelemetry API span when `opentelemetry` imports. No collector endpoint is configured in this repo, and a missing exporter does not fail the request. Economics stay on `GET /v1/metrics`; telemetry is the runtime hook, not the AER cost report.
+Set `MAX_AGENT_OTEL=1` to also open an OpenTelemetry API span when `opentelemetry` imports. No collector endpoint is configured in this repo, and a missing exporter does not fail the request. Economics stay on the authenticated `GET /v1/metrics`; telemetry is the runtime hook, not the AER cost report.
 
 Recovery time is operator-driven: restore the latest snapshot, then re-run the drill. There is no automatic failover.

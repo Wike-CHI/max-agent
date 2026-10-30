@@ -81,8 +81,10 @@ class Scheduler:
         max_concurrency: int = 1,
         starve_after_seconds: float = 3600.0,
         fairness_step: int = 10,
+        created_by: str | None = None,
     ) -> None:
         self._external = session
+        self.created_by = created_by
         if session_factory is not None:
             self.session_factory = session_factory
         elif session is not None:
@@ -217,7 +219,7 @@ class Scheduler:
         excluded: set[str] = set()
         while True:
             with self._transaction() as session:
-                pick = pick_next(session, utcnow(), excluded, self.policy)
+                pick = pick_next(session, utcnow(), excluded, self.policy, created_by=self.created_by)
             if pick.reason == "concurrency":
                 raise ConcurrencyLimitError(f"concurrency limit {self.policy.max_concurrency} reached")
             if pick.task_id is None:
