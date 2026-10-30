@@ -22,10 +22,17 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Require linked Issue
+      - name: Require linked Issue or scoped Dependabot exception
         env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: python scripts/check_pr_issue_link.py
+          GITHUB_ACTOR: ${{ github.actor }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          export PR_FILES
+          PR_FILES="$(gh pr diff "$PR_URL" --name-only)"
+          python scripts/check_pr_issue_link.py
 
   tests:
     name: test-py${{ matrix.python-version }}
