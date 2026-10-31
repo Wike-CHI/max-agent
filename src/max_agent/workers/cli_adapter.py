@@ -85,8 +85,20 @@ _VENDOR_BINARY = {"grok": "grok", "codex": "codex", "claude": "claude"}
 _VENDOR_VERSION = {"grok": ("version",), "codex": ("--version",), "claude": ("--version",)}
 _VENDOR_PASSTHROUGH = {
     "grok": ("XAI_API_KEY",),
-    "codex": ("OPENAI_API_KEY",),
-    "claude": ("ANTHROPIC_API_KEY",),
+    "codex": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    "claude": (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ),
 }
 
 

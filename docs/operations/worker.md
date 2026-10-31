@@ -48,6 +48,8 @@ Real execution still requires `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` and a successful 
 
 An isolated worktree is only a separate checkout, not OS, user, container, or VM isolation. CLI sandbox flags do not change that boundary.
 
+Compatible Anthropic/OpenAI endpoints (for example MiniMax Claude) need their `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` or `OPENAI_BASE_URL` present in the host worker environment; the CliWorker sandbox allowlist passes those through to the child when set, and omits them when unset. Database URLs and GitHub tokens still never reach the child.
+
 For a local gate check or an operator-authorized live drill, run `scripts/real_cli_e2e_drill.sh` and see [evidence/real-cli-e2e-2026-10-31.md](evidence/real-cli-e2e-2026-10-31.md).
 
 ## Shutdown and recovery

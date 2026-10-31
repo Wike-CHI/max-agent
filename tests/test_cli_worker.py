@@ -20,10 +20,11 @@ from max_agent.workers.cli_adapter import (
     FORBIDDEN_CLI_FLAGS,
     REQUIRE_REAL_ENV,
     Probe,
+    _passthrough,
     build_exec_argv,
     choose_vendor,
 )
-from max_agent.workers.sandbox import redact, run_bounded
+from max_agent.workers.sandbox import ALLOWED_PASSTHROUGH, child_env, redact, run_bounded
 
 
 @pytest.fixture(autouse=True)
@@ -600,3 +601,143 @@ def test_production_tag_still_blocks_before_the_worker(session, tmp_path: Path) 
     )
     assert out.status == TaskStatus.WAITING_APPROVAL
     assert not (tmp_path / "blocked").exists()
+
+def test_claude_passthrough_includes_base_url_and_auth_token_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-testkey123456")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "mm-auth-token-12345678")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.minimax.cn/anthropic")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "MiniMax-M2")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "MiniMax-M2")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "MiniMax-M2")
+    monkeypatch.setenv("MAX_AGENT_DATABASE_URL", "sqlite:////prod/secret.db")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_SHOULDNOTPASS123456")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-SHOULDNOTPASS")
+    monkeypatch.setenv("XAI_API_KEY", "xai-SHOULDNOTPASS123456")
+
+    values = _passthrough("claude")
+    assert values["ANTHROPIC_API_KEY"] == "sk-ant-testkey123456"
+    assert values["ANTHROPIC_AUTH_TOKEN"] == "mm-auth-token-12345678"
+    assert values["ANTHROPIC_BASE_URL"] == "https://api.minimax.cn/anthropic"
+    assert values["ANTHROPIC_MODEL"] == "MiniMax-M2"
+    assert values["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "MiniMax-M2"
+    assert values["CLAUDE_CODE_SUBAGENT_MODEL"] == "MiniMax-M2"
+    assert "MAX_AGENT_DATABASE_URL" not in values
+    assert "GITHUB_TOKEN" not in values
+    assert "OPENAI_API_KEY" not in values
+    assert "XAI_API_KEY" not in values
+
+    home = tmp_path / "home"
+    tmp = tmp_path / "tmp"
+    home.mkdir()
+    tmp.mkdir()
+    env = child_env(home=home, tmp=tmp, passthrough=values)
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "mm-auth-token-12345678"
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.minimax.cn/anthropic"
+    assert env["ANTHROPIC_MODEL"] == "MiniMax-M2"
+    assert "MAX_AGENT_DATABASE_URL" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert "XAI_API_KEY" not in env
+    for key in (
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        assert key in ALLOWED_PASSTHROUGH
+
+
+def test_claude_passthrough_omits_unset_base_url_and_auth_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-testkey123456")
+
+    values = _passthrough("claude")
+    assert values == {"ANTHROPIC_API_KEY": "sk-ant-testkey123456"}
+    assert "ANTHROPIC_BASE_URL" not in values
+    assert "ANTHROPIC_AUTH_TOKEN" not in values
+
+    home = tmp_path / "home"
+    tmp = tmp_path / "tmp"
+    home.mkdir()
+    tmp.mkdir()
+    env = child_env(home=home, tmp=tmp, passthrough=values)
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-testkey123456"
+    assert "ANTHROPIC_BASE_URL" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
+def test_codex_passthrough_includes_openai_base_url_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-testkey123456")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://compatible.example/v1")
+    monkeypatch.setenv("MAX_AGENT_DATABASE_URL", "sqlite:////prod/secret.db")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_SHOULDNOTPASS123456")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SHOULDNOTPASS")
+
+    values = _passthrough("codex")
+    assert values["OPENAI_API_KEY"] == "sk-openai-testkey123456"
+    assert values["OPENAI_BASE_URL"] == "https://compatible.example/v1"
+    assert "MAX_AGENT_DATABASE_URL" not in values
+    assert "GITHUB_TOKEN" not in values
+    assert "ANTHROPIC_API_KEY" not in values
+
+    home = tmp_path / "home"
+    tmp = tmp_path / "tmp"
+    home.mkdir()
+    tmp.mkdir()
+    env = child_env(home=home, tmp=tmp, passthrough=values)
+    assert env["OPENAI_BASE_URL"] == "https://compatible.example/v1"
+    assert "MAX_AGENT_DATABASE_URL" not in env
+    assert "GITHUB_TOKEN" not in env
+
+
+def test_codex_passthrough_omits_unset_openai_base_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-testkey123456")
+    values = _passthrough("codex")
+    assert values == {"OPENAI_API_KEY": "sk-openai-testkey123456"}
+    home = tmp_path / "home"
+    tmp = tmp_path / "tmp"
+    home.mkdir()
+    tmp.mkdir()
+    env = child_env(home=home, tmp=tmp, passthrough=values)
+    assert "OPENAI_BASE_URL" not in env
+
+
+def test_grok_passthrough_stays_xai_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XAI_API_KEY", "xai-testkey12345678")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://should-not-pass.example")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://should-not-pass.example")
+    values = _passthrough("grok")
+    assert values == {"XAI_API_KEY": "xai-testkey12345678"}
+
+
+def test_child_env_still_rejects_db_and_github_even_if_forced(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    tmp = tmp_path / "tmp"
+    home.mkdir()
+    tmp.mkdir()
+    env = child_env(
+        home=home,
+        tmp=tmp,
+        passthrough={
+            "MAX_AGENT_DATABASE_URL": "sqlite:////prod/secret.db",
+            "GITHUB_TOKEN": "ghp_SHOULDNOTPASS123456",
+            "ANTHROPIC_BASE_URL": "https://api.minimax.cn/anthropic",
+        },
+    )
+    assert "MAX_AGENT_DATABASE_URL" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.minimax.cn/anthropic"
