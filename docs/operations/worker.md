@@ -40,6 +40,16 @@ By default the worker can claim tasks for every owner. Use `--created-by user` t
 
 Create a task through the normal CLI or authenticated API. Do not call `run`; the worker picks it up automatically. Existing approval, side-effect replay, external-CLI authorization, and task-ownership rules still apply.
 
+## Require a real CLI worker
+
+For production or acceptance CLI tasks, set `worker_payload.require_real_worker` to `true` (string values `1`, `true`, and `yes` are also accepted), or export `MAX_AGENT_REQUIRE_REAL_WORKER=1` in the worker process. The adapter rejects explicit `stub` and `auto` stub fallback with `adapter_failure: real_worker_required` before creating a worktree. Verification and finalization also refuse terminal `succeeded` when a CLI report contains `real_cli_invoked` but its value is not `true`. Reports from non-CLI mock workers do not contain that key and retain their existing behavior.
+
+Real execution still requires `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` and a successful vendor version probe. Always inspect the worker output for `vendor`, `real_cli_invoked`, `adapter_failure`, and `require_real_worker`; do not treat stub success as external-CLI acceptance. Leaving the requirement unset preserves the local stub demo for development and CI.
+
+An isolated worktree is only a separate checkout, not OS, user, container, or VM isolation. CLI sandbox flags do not change that boundary.
+
+For a local gate check or an operator-authorized live drill, run `scripts/real_cli_e2e_drill.sh` and see [evidence/real-cli-e2e-2026-10-31.md](evidence/real-cli-e2e-2026-10-31.md).
+
 ## Shutdown and recovery
 
 Send `SIGTERM` or use Ctrl-C (`SIGINT`):

@@ -18,6 +18,7 @@ from max_agent.models.schemas import ScheduleRequest, TaskCreate
 from max_agent.workers.cli_adapter import (
     ADAPTER_VERSION,
     FORBIDDEN_CLI_FLAGS,
+    REQUIRE_REAL_ENV,
     Probe,
     build_exec_argv,
     choose_vendor,
@@ -28,6 +29,7 @@ from max_agent.workers.sandbox import redact, run_bounded
 @pytest.fixture(autouse=True)
 def _deny_external_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", raising=False)
+    monkeypatch.delenv(REQUIRE_REAL_ENV, raising=False)
 
 
 def _outputs(session, task_id: str) -> dict:
@@ -179,6 +181,36 @@ def test_choose_vendor_authorization_and_auto_preference() -> None:
     assert choose_vendor("claude", failed_probe, authorized=True) == ("claude", "cli_unavailable")
 
 
+def test_require_real_worker_rejects_stub_success(session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(REQUIRE_REAL_ENV, "1")
+    workspace_root = tmp_path / "auto-fallback"
+    _created, out = _run(
+        session,
+        "auto fallback must not silently use stub",
+        {"vendor": "auto", "workspace_root": str(workspace_root)},
+    )
+    assert out.status == TaskStatus.FAILED
+    outputs = _outputs(session, out.id)
+    assert outputs["adapter_failure"] == "real_worker_required"
+    assert outputs["require_real_worker"] is True
+    assert outputs["real_cli_invoked"] is False
+    assert outputs["cli_invoked"] is False
+    assert not workspace_root.exists()
+
+
+def test_require_real_worker_payload_flag_rejects_stub(session, tmp_path: Path) -> None:
+    _created, out = _run(
+        session,
+        "explicit stub is refused",
+        {"vendor": "stub", "workspace_root": str(tmp_path / "ws"), "require_real_worker": True},
+    )
+    assert out.status == TaskStatus.FAILED
+    outputs = _outputs(session, out.id)
+    assert outputs["adapter_failure"] == "real_worker_required"
+    assert outputs["require_real_worker"] is True
+    assert outputs["real_cli_invoked"] is False
+
+
 def test_fixture_issue_passes_with_stub_and_archives_artifacts(session, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_SHOULDNOTLEAK1234")
     monkeypatch.setenv("XAI_API_KEY", "xai-SHOULDNOTLEAK1234")
@@ -198,6 +230,7 @@ def test_fixture_issue_passes_with_stub_and_archives_artifacts(session, tmp_path
     assert outputs["vendor"] == "stub"
     assert outputs["cli_invoked"] is True
     assert outputs["real_cli_invoked"] is False
+    assert outputs["require_real_worker"] is False
     assert outputs["exit_code"] == 0
     assert outputs["pytest_exit_code"] == 0
     assert outputs["timed_out"] is False
@@ -207,6 +240,8 @@ def test_fixture_issue_passes_with_stub_and_archives_artifacts(session, tmp_path
     assert (workspace.parent / "seed" / "calc.py").read_text(encoding="utf-8").find("return a + b") == -1
     manifest = json.loads(Path(outputs["artifact_manifest"]).read_text(encoding="utf-8"))
     assert manifest["adapter_version"] == ADAPTER_VERSION
+    assert manifest["real_cli_invoked"] is False
+    assert manifest["require_real_worker"] is False
     names = {item["path"] for item in manifest["artifacts"]}
     assert "calc.py" in names
     assert ".git" not in names
@@ -314,6 +349,42 @@ raise SystemExit(0)
     assert outputs["real_cli_invoked"] is True
     assert "xai-LIVEKEY123456" not in json.dumps(outputs)
     assert FORBIDDEN_CLI_FLAGS.isdisjoint(outputs["argv"])
+
+
+def test_require_real_worker_allows_real_cli_invoked(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "grok"
+    script.write_text(
+        """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[:1] == ["version"]:
+    raise SystemExit(0)
+cwd = args[args.index("--cwd") + 1]
+Path(cwd, "calc.py").write_text("def add(a: int, b: int) -> int:\\n    return a + b\\n")
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv(REQUIRE_REAL_ENV, "1")
+    _created, out = _run(
+        session,
+        "require an authorized real CLI",
+        {"vendor": "grok", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    outputs = _outputs(session, out.id)
+    assert outputs["vendor"] == "grok"
+    assert outputs["require_real_worker"] is True
+    assert outputs["real_cli_invoked"] is True
 
 
 def test_authorized_claude_runs_after_version_probe_with_scoped_credentials(
