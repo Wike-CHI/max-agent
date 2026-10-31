@@ -178,10 +178,10 @@ uv run --no-sync python -m max_agent.cli.main --json events <MCP_TASK_ID>
 
 ## 6. CLI worker stub, then operator-only vendor probes
 
-First prove the isolated CLI-worker mechanics with the gate disabled:
+First prove the isolated CLI-worker mechanics with both external execution and the real-worker requirement disabled:
 
 ```bash
-unset MAX_AGENT_ALLOW_EXTERNAL_CLI
+unset MAX_AGENT_ALLOW_EXTERNAL_CLI MAX_AGENT_REQUIRE_REAL_WORKER
 uv run --no-sync python -m max_agent.cli.main --json create \
   'Grok e2e CLI stub' -c worker_ok -w cli \
   --payload '{"vendor":"stub","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}' \
@@ -192,40 +192,43 @@ uv run --no-sync python -m max_agent.cli.main --json events <TASK_ID>
 ```
 
 - [ ] Final status is `succeeded` and fixture pytest passed.
-- [ ] Worker output says `vendor: stub`, `real_cli_invoked: false`, and `external_cli_authorized: false`.
+- [ ] Worker output says `vendor: stub`, `real_cli_invoked: false`, `require_real_worker: false`, and `external_cli_authorized: false`.
 - [ ] The event journal and isolated `.max-agent/manifest.json` artifact are inspectable.
 
-Only now may the **operator**, outside the Grok skill, enable the external gate for probing:
+Only now may the **operator**, outside the Grok skill, enable external execution and forbid stub fallback:
 
 ```bash
 export MAX_AGENT_ALLOW_EXTERNAL_CLI=1
+export MAX_AGENT_REQUIRE_REAL_WORKER=1
 command -v grok || true
 command -v codex || true
 command -v claude || true
 ```
 
-Claude Code is supported under the same operator-only gate and uses `ANTHROPIC_API_KEY`. Authorized `auto` probes and selects vendors in this order: Grok → Codex → Claude.
+Claude Code is supported under the same operator-only gate and uses `ANTHROPIC_API_KEY`. Authorized `auto` probes and selects vendors in this order: Grok → Codex → Claude. `MAX_AGENT_REQUIRE_REAL_WORKER=1` applies to every CLI task claimed by that worker; alternatively set `"require_real_worker":true` in one task's payload.
 
 Repeat create/run/status/events with unique idempotency keys and one of these payloads at a time:
 
 ```json
-{"vendor":"auto","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}
-{"vendor":"grok","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}
-{"vendor":"codex","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}
-{"vendor":"claude","workspace_root":"/tmp/max-agent-grok-e2e-workspaces"}
+{"vendor":"auto","workspace_root":"/tmp/max-agent-grok-e2e-workspaces","require_real_worker":true}
+{"vendor":"grok","workspace_root":"/tmp/max-agent-grok-e2e-workspaces","require_real_worker":true}
+{"vendor":"codex","workspace_root":"/tmp/max-agent-grok-e2e-workspaces","require_real_worker":true}
+{"vendor":"claude","workspace_root":"/tmp/max-agent-grok-e2e-workspaces","require_real_worker":true}
 ```
 
 Interpret the result honestly:
 
 - If a binary is absent or its version probe fails, an explicit vendor task should finish `failed` with `adapter_failure: cli_unavailable`; record this classified skip and `cli_invoked: false`.
-- `auto` may finish `succeeded` by selecting `stub`. This is only fallback evidence. Inspect `vendor` and `real_cli_invoked` before making any claim.
-- If a real vendor is present, do not execute it until the operator has explicitly authorized its credentials, possible cost, network access, timeout, and non-production workspace. Real acceptance requires `real_cli_invoked: true`, successful verification, and artifacts.
-- Never create a shell shim or other fake production CLI to make this check pass.
+- With the requirement enabled, `auto` must not succeed through stub. If no real vendor is enabled it finishes `failed` with `adapter_failure: real_worker_required`, `cli_invoked: false`, and `real_cli_invoked: false`.
+- If a real vendor is present, do not execute it until the operator has explicitly authorized its credentials, possible cost, network access, timeout, and non-production workspace. Real acceptance requires `real_cli_invoked: true`, successful verification, terminal `succeeded`, and artifacts. Verification/finalization enforce the same boundary for CLI reports.
+- Never create a shell shim or other fake production CLI to make this check pass. A worktree and CLI sandbox flags are not OS or VM isolation.
+
+The focused drill is `scripts/real_cli_e2e_drill.sh --real --vendor claude` (or `codex`, `grok`, `auto`). Without `--real` it runs only gate tests. Live mode writes `create/run/status/events` JSON plus `real-cli-result.json` under `/tmp/max-agent-real-cli-e2e.*`, returns non-zero for success without a real invocation, and labels unavailable vendors as skips.
 
 After probing:
 
 ```bash
-unset MAX_AGENT_ALLOW_EXTERNAL_CLI MAX_AGENT_API_TOKEN MAX_AGENT_WEBHOOK_SECRET XAI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY
+unset MAX_AGENT_ALLOW_EXTERNAL_CLI MAX_AGENT_REQUIRE_REAL_WORKER MAX_AGENT_API_TOKEN MAX_AGENT_WEBHOOK_SECRET XAI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY
 ```
 
 ## 7. Evidence and residual-risk checklist

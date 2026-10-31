@@ -25,6 +25,7 @@ from max_agent.models.aer import CostReading, usage_from_result
 from max_agent.models.enums import AttemptStatus, EventType, FailureClass, TaskStatus, WorkerKind
 from max_agent.models.schemas import TaskRead, WorkerResult
 from max_agent.workers.base import Worker, WorkerContext
+from max_agent.workers.cli_adapter import require_real_worker
 from max_agent.workers.registry import get_worker
 
 _IN_FLIGHT = frozenset({TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.VERIFYING})
@@ -213,6 +214,26 @@ def finalize_in_session(
 
     row = transition_task(session, row, TaskStatus.VERIFYING, "verifying acceptance criteria", journal=journal)
     verdict = verify(list(row.acceptance_criteria or []), result, payload=dict(row.worker_payload or {}))
+    if (
+        verdict.passed
+        and require_real_worker(claim.payload)
+        and "real_cli_invoked" in result.outputs
+        and result.outputs["real_cli_invoked"] is not True
+    ):
+        verdict = verdict.model_copy(
+            update={
+                "passed": False,
+                "message": "real CLI worker required but real_cli_invoked is not True",
+                "checks": [
+                    *verdict.checks,
+                    {
+                        "criterion": "require_real_worker",
+                        "passed": False,
+                        "detail": f"real_cli_invoked={result.outputs['real_cli_invoked']!r}",
+                    },
+                ],
+            }
+        )
     failure_class = None if verdict.passed else FailureClass.VERIFICATION
     journal.append(
         claim.task_id,

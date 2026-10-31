@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from max_agent.models.schemas import VerificationResult, WorkerResult
+from max_agent.workers.cli_adapter import require_real_worker
 
 
 def verify(
@@ -23,6 +24,10 @@ def verify(
     - output_equals:<key>=<value>
     - regex:<pattern>  (search in summary)
     - worker_ok        (worker_result.ok must be true)
+
+    When a real worker is required, CLI reports must have real_cli_invoked=True.
+    Reports without that key are left to the normal criteria so mock workers
+    retain their existing behavior.
     """
     payload = payload or {}
     blob = _blob(worker_result)
@@ -36,6 +41,18 @@ def verify(
         checks.append({"criterion": crit, "passed": ok, "detail": detail})
         if not ok:
             all_passed = False
+
+    if require_real_worker(payload) and "real_cli_invoked" in worker_result.outputs:
+        invoked = worker_result.outputs["real_cli_invoked"]
+        ok = invoked is True
+        checks.append(
+            {
+                "criterion": "require_real_worker",
+                "passed": ok,
+                "detail": f"real_cli_invoked={invoked!r}",
+            }
+        )
+        all_passed = all_passed and ok
 
     msg = "all checks passed" if all_passed else "one or more checks failed"
     return VerificationResult(passed=all_passed, checks=checks, message=msg)

@@ -9,14 +9,18 @@ and worker_payload:
 - cancel_file: touched by the caller to SIGTERM the child
 - subprocess_timeout_seconds, max_output_bytes
 - stub_sleep_seconds, stub_exit_code, stub_stdout_bytes, stub_canary
+- require_real_worker: refuse stub fallback unless a real CLI is invoked
 
 Outputs (also archived as `.max-agent/manifest.json`) include adapter_version,
 vendor, exit_code, stdout, stderr, timed_out, cancelled, adapter_failure,
-artifact inventory, and argv. Real Grok Build / Codex / Claude Code processes
-start only when `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` and `grok version` /
-`codex --version` / `claude --version` exits 0. Otherwise the run uses the local
-stub or returns a classified skip. Authorized `auto` prefers Grok, then Codex,
-then Claude.
+artifact inventory, argv, require_real_worker, and real_cli_invoked. Real Grok
+Build / Codex / Claude Code processes start only when
+`MAX_AGENT_ALLOW_EXTERNAL_CLI=1` and `grok version` / `codex --version` /
+`claude --version` exits 0. Otherwise the run uses the local stub or returns a
+classified skip. Authorized `auto` prefers Grok, then Codex, then Claude.
+Setting `require_real_worker` in worker_payload or
+`MAX_AGENT_REQUIRE_REAL_WORKER=1` makes stub selection and any result without
+`real_cli_invoked=true` fail with `real_worker_required`.
 
 Grok is invoked as headless `-p` with `--sandbox strict` (no `--yolo`).
 Codex is invoked as `exec --sandbox workspace-write` (no `danger-full-access`).
@@ -32,6 +36,7 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +56,7 @@ from max_agent.workers.worktree import WorktreeError, create_isolated_worktree
 
 ADAPTER_VERSION = "1"
 ALLOW_ENV = "MAX_AGENT_ALLOW_EXTERNAL_CLI"
+REQUIRE_REAL_ENV = "MAX_AGENT_REQUIRE_REAL_WORKER"
 STUB_PATH = Path(__file__).resolve().parent / "cli_stub.py"
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "cli_issue"
 
@@ -66,7 +72,13 @@ FORBIDDEN_CLI_FLAGS = frozenset(
 )
 
 _NON_RECOVERABLE = frozenset(
-    {"cli_not_authorized", "cli_unavailable", "path_violation", "worktree_failed"}
+    {
+        "cli_not_authorized",
+        "cli_unavailable",
+        "path_violation",
+        "real_worker_required",
+        "worktree_failed",
+    }
 )
 _VENDOR_ORDER = ("grok", "codex", "claude")
 _VENDOR_BINARY = {"grok": "grok", "codex": "codex", "claude": "claude"}
@@ -76,6 +88,14 @@ _VENDOR_PASSTHROUGH = {
     "codex": ("OPENAI_API_KEY",),
     "claude": ("ANTHROPIC_API_KEY",),
 }
+
+
+def require_real_worker(payload: dict | None = None, environ: Mapping | None = None) -> bool:
+    env = os.environ if environ is None else environ
+    value = (payload or {}).get("require_real_worker")
+    return env.get(REQUIRE_REAL_ENV) == "1" or value is True or (
+        isinstance(value, str) and value.strip().lower() in {"1", "true", "yes"}
+    )
 
 
 @dataclass(frozen=True)
@@ -198,6 +218,7 @@ class CliWorker(Worker):
     def run(self, ctx: WorkerContext) -> WorkerResult:
         payload = dict(ctx.payload)
         requested = str(payload.get("vendor") or "auto")
+        required = require_real_worker(payload)
         authorized = os.environ.get(ALLOW_ENV) == "1"
         probes = probe_vendors()
         vendor, failure = choose_vendor(requested, probes, authorized)
@@ -211,17 +232,21 @@ class CliWorker(Worker):
                 ctx.on_tool_call(tool, safe_args)
 
         note("cli.probe", {"vendor": vendor, "authorized": authorized, "failure": failure or ""})
+        if failure is None and required and vendor == "stub":
+            failure = "real_worker_required"
         if failure:
+            summary = "stub refused because a real CLI worker is required" if failure == "real_worker_required" else failure
             return self._finish(
                 ok=False,
-                summary=failure,
+                summary=summary,
                 failure=failure,
                 vendor=vendor,
                 authorized=authorized,
+                required=required,
                 probes=probes,
                 tool_calls=tool_calls,
                 secrets=secrets,
-                error=failure,
+                error=summary,
             )
 
         try:
@@ -233,6 +258,7 @@ class CliWorker(Worker):
                 failure="path_violation",
                 vendor=vendor,
                 authorized=authorized,
+                required=required,
                 probes=probes,
                 tool_calls=tool_calls,
                 secrets=secrets,
@@ -253,6 +279,7 @@ class CliWorker(Worker):
                 failure="worktree_failed",
                 vendor=vendor,
                 authorized=authorized,
+                required=required,
                 probes=probes,
                 tool_calls=tool_calls,
                 secrets=secrets,
@@ -304,6 +331,8 @@ class CliWorker(Worker):
             secrets=secrets,
         )
         failure = _classify_run(ran)
+        if required and not real:
+            failure = "real_worker_required"
         pytest_exit: int | None = None
         pytest_stdout = ""
         pytest_truncated = False
@@ -330,6 +359,7 @@ class CliWorker(Worker):
         report = _base_report(
             vendor=vendor,
             authorized=authorized,
+            required=required,
             probes=probes,
             invoked=True,
             real=real,
@@ -367,6 +397,7 @@ class CliWorker(Worker):
         failure: str | None,
         vendor: str,
         authorized: bool,
+        required: bool,
         probes: list[Probe],
         tool_calls: list[dict[str, Any]],
         secrets: list[str],
@@ -375,6 +406,7 @@ class CliWorker(Worker):
         report = _base_report(
             vendor=vendor,
             authorized=authorized,
+            required=required,
             probes=probes,
             invoked=False,
             real=False,
@@ -529,6 +561,7 @@ def _base_report(
     *,
     vendor: str,
     authorized: bool,
+    required: bool,
     probes: list[Probe],
     invoked: bool,
     real: bool,
@@ -549,6 +582,7 @@ def _base_report(
         "cli_invoked": invoked,
         "real_cli_invoked": real and invoked,
         "external_cli_authorized": authorized,
+        "require_real_worker": required,
         "exit_code": exit_code,
         "stdout": stdout,
         "stderr": stderr,
@@ -597,6 +631,9 @@ def _archive(workspace: Path, report: dict[str, Any]) -> Path:
     body = {
         "adapter_version": report["adapter_version"],
         "vendor": report["vendor"],
+        "cli_invoked": report["cli_invoked"],
+        "real_cli_invoked": report["real_cli_invoked"],
+        "require_real_worker": report["require_real_worker"],
         "exit_code": report["exit_code"],
         "adapter_failure": report["adapter_failure"],
         "timed_out": report["timed_out"],
