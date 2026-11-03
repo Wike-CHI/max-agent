@@ -134,7 +134,7 @@ Every task read/write, queue operation, telemetry, metrics, and AER retry reques
 
 **Do not expose the HTTP API publicly without authentication.** Keep it on loopback or a private network until `MAX_AGENT_API_TOKEN` is configured. Remote access also requires TLS or a private tunnel so the bearer token is not sent in cleartext. This is a single-user token boundary, not multi-tenant IAM; OIDC and token rotation remain future work.
 
-Webhook requests need `MAX_AGENT_WEBHOOK_SECRET` plus headers `X-Max-Timestamp`, `X-Max-Signature` (hex HMAC-SHA256 of `{timestamp}.{raw_body}`), and `X-Max-Delivery-Id`. Replays of the same delivery id return the original task. A new delivery with the same `idempotency_key` attaches to that task and does not start a second one. The handler does not run the worker.
+Webhook requests need `MAX_AGENT_WEBHOOK_SECRET` plus headers `X-Max-Timestamp`, `X-Max-Signature` (hex HMAC-SHA256 of `{timestamp}.{raw_body}`), and `X-Max-Delivery-Id`. Replays of the same delivery id return the original task. A new delivery with the same `idempotency_key` attaches to that task and does not start a second one. The handler does not run the worker. The task it creates is owned by the same `MAX_AGENT_API_ACTOR` principal as API-created tasks.
 
 ## Tests
 

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -121,6 +126,53 @@ def test_other_principal_cannot_read_or_mutate_task(
     with session_scope(db_url) as session:
         events = TaskService(session).list_events(task_id)
     assert all(event.event_type.value != "idempotent_hit" for event in events)
+
+
+def test_webhook_task_is_owned_by_configured_api_actor(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Webhook create must store the same principal require_principal resolves."""
+    monkeypatch.setenv("MAX_AGENT_API_ACTOR", "  alice  ")
+    monkeypatch.setenv("MAX_AGENT_WEBHOOK_SECRET", "unit-test-secret")
+    body = json.dumps(
+        {
+            "idempotency_key": "webhook-owned-by-alice",
+            "goal": "webhook mock",
+            "acceptance_criteria": ["worker_ok"],
+            "worker_kind": "mock",
+            "worker_payload": {"mode": "success"},
+        }
+    ).encode()
+    stamp = str(int(time.time()))
+    signature = hmac.new(b"unit-test-secret", stamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    created = client.post(
+        "/v1/inbound/webhook",
+        content=body,
+        headers={
+            "content-type": "application/json",
+            "X-Max-Timestamp": stamp,
+            "X-Max-Signature": signature,
+            "X-Max-Delivery-Id": "delivery-alice",
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    task_id = payload["task_id"]
+    assert payload["task"]["created_by"] == "alice"
+
+    listed = client.get("/v1/tasks")
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [task_id]
+    assert listed.json()[0]["created_by"] == "alice"
+
+    fetched = client.get(f"/v1/tasks/{task_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["created_by"] == "alice"
+
+    monkeypatch.setenv("MAX_AGENT_API_ACTOR", "bob")
+    assert client.get("/v1/tasks").json() == []
+    denied = client.get(f"/v1/tasks/{task_id}")
+    assert denied.status_code == 403
 
 
 def test_queue_only_runs_tasks_owned_by_principal(

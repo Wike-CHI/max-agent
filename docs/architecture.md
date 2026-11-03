@@ -109,7 +109,7 @@ Inbound webhook（`POST /v1/inbound/webhook`）校验 HMAC，用 `X-Max-Delivery
 
 ## HTTP 认证与任务授权
 
-除 health/ready 和独立 HMAC 校验的 webhook 外，HTTP API 都要求 `Authorization: Bearer <MAX_AGENT_API_TOKEN>`，包括任务读改、队列、telemetry、metrics 与 AER retry。`MAX_AGENT_API_ACTOR` 给出单用户主体（默认 `user`），任务的 `created_by` 是授权边界：列表只返回自己的任务，其他主体的读写、调度、取消与审批返回 403。审批请求里的 `actor` 仅作一致性校验；记录值永远来自认证主体，不一致返回 403。未配置 token 时受保护接口 fail closed。OIDC 和多租户 IAM 不在当前范围内。
+除 health/ready 和独立 HMAC 校验的 webhook 外，HTTP API 都要求 `Authorization: Bearer <MAX_AGENT_API_TOKEN>`，包括任务读改、队列、telemetry、metrics 与 AER retry。`MAX_AGENT_API_ACTOR` 给出单用户主体（默认 `user`），任务的 `created_by` 是授权边界：列表只返回自己的任务，其他主体的读写、调度、取消与审批返回 403。签名 webhook 创建任务时写入同一个主体。审批请求里的 `actor` 仅作一致性校验；记录值永远来自认证主体，不一致返回 403。未配置 token 时受保护接口 fail closed。OIDC 和多租户 IAM 不在当前范围内。
 
 ## 人工审批策略
 

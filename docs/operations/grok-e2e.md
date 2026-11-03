@@ -32,7 +32,7 @@ unset MAX_AGENT_ALLOW_EXTERNAL_CLI XAI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY
 mkdir -p /tmp/max-agent-grok-e2e-evidence
 ```
 
-Use a new database path, or remove `/tmp/max-agent-grok-e2e.db` only when it is known to be left by an earlier disposable drill. `MAX_AGENT_API_ACTOR=user` is aligned with the current webhook task owner; another actor receives 403 for that task even with the right bearer token.
+Use a new database path, or remove `/tmp/max-agent-grok-e2e.db` only when it is known to be left by an earlier disposable drill. Webhook-created tasks use the same `MAX_AGENT_API_ACTOR` owner as API-created tasks. A different actor receives 403 for that task even with the right bearer token.
 
 Initialize through the real CLI:
 
