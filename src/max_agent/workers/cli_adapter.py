@@ -12,12 +12,20 @@ and worker_payload:
 - require_real_worker: refuse stub fallback unless a real CLI is invoked
 
 Outputs (also archived as `.max-agent/manifest.json`) include adapter_version,
-vendor, exit_code, stdout, stderr, timed_out, cancelled, adapter_failure,
-artifact inventory, argv, require_real_worker, and real_cli_invoked. Real Grok
-Build / Codex / Claude Code processes start only when
+vendor, model, provider, exit_code, stdout, stderr, timed_out, cancelled,
+adapter_failure, artifact inventory, argv, require_real_worker, and
+real_cli_invoked. A real invocation also copies a CLI usage report when one
+is present. Real Grok Build / Codex / Claude Code processes start only when
 `MAX_AGENT_ALLOW_EXTERNAL_CLI=1` and `grok version` / `codex --version` /
 `claude --version` exits 0. Otherwise the run uses the local stub or returns a
 classified skip. Authorized `auto` prefers Grok, then Codex, then Claude.
+Model and provider are recorded for the process that actually started. Claude
+uses a model in CLI JSON, then `ANTHROPIC_MODEL`, then
+`CLAUDE_CODE_SUBAGENT_MODEL`. Other vendors use a model in CLI JSON when
+present. Missing names are the string `unknown`, never `0`. A `measured` or
+`estimate` usage report, or a vendor cost field such as `total_cost_usd`, is
+attached for the attempt row. No report leaves cost unknown. This does not
+choose a model tier or escalate.
 Setting `require_real_worker` in worker_payload or
 `MAX_AGENT_REQUIRE_REAL_WORKER=1` makes stub selection and any result without
 `real_cli_invoked=true` fail with `real_worker_required`.
@@ -42,7 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from max_agent.models.enums import WorkerKind
-from max_agent.models.schemas import WorkerResult
+from max_agent.models.schemas import UsageReport, WorkerResult
 from max_agent.workers.base import Worker, WorkerContext
 from max_agent.workers.sandbox import (
     child_env,
@@ -82,6 +90,10 @@ _NON_RECOVERABLE = frozenset(
 )
 _VENDOR_ORDER = ("grok", "codex", "claude")
 _VENDOR_BINARY = {"grok": "grok", "codex": "codex", "claude": "claude"}
+_VENDOR_PROVIDER = {"grok": "xai", "codex": "openai", "claude": "anthropic"}
+_COST_LEDGERS = frozenset({"grok_bot_quota", "cli_quota", "api_spend"})
+_USAGE_MARKERS = frozenset({"measured", "estimate"})
+_USD_COST_KEYS = ("total_cost_usd", "cost_usd", "costUSD")
 _VENDOR_VERSION = {"grok": ("version",), "codex": ("--version",), "claude": ("--version",)}
 _VENDOR_PASSTHROUGH = {
     "grok": ("XAI_API_KEY",),
@@ -126,6 +138,29 @@ def cli_workspace_roots() -> tuple[Path, ...]:
     if extra:
         roots.append(Path(extra))
     return tuple(roots)
+
+
+def resolve_cli_identity(
+    vendor: str,
+    stdout: str,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, str, dict[str, Any] | None]:
+    """Return model, provider, and an optional usage report.
+
+    Model comes from CLI JSON, then from ``ANTHROPIC_MODEL`` /
+    ``CLAUDE_CODE_SUBAGENT_MODEL`` for Claude. Provider comes from JSON, then
+    from the vendor (``xai``, ``openai``, ``anthropic``). A name that is still
+    missing is the string ``unknown``. A cost report is returned only for an
+    explicit measured/estimate amount or a vendor cost field. Other numbers
+    are dropped instead of being stored as ``0``.
+    """
+    env = {} if environ is None else environ
+    payload = _parse_cli_json(stdout)
+    usage_raw = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    model = _model_from_payload(payload) or _host_model(vendor, env) or "unknown"
+    provider = _provider_name(vendor, payload, usage_raw)
+    usage = _usage_report(payload, model=model, provider=provider)
+    return model, provider, usage
 
 
 def choose_vendor(requested: str, probes: list[Probe], authorized: bool) -> tuple[str, str | None]:
@@ -399,6 +434,7 @@ class CliWorker(Worker):
             tool_calls=tool_calls,
             recoverable=failure not in _NON_RECOVERABLE if failure else True,
             error=None if ok else summary,
+            usage=_result_usage(report),
         )
 
     def _finish(
@@ -441,6 +477,7 @@ class CliWorker(Worker):
             tool_calls=tool_calls,
             recoverable=failure not in _NON_RECOVERABLE if failure else True,
             error=redact(error or summary, secrets),
+            usage=_result_usage(report),
         )
 
 
@@ -569,6 +606,200 @@ def _redact_argv(argv: list[str], secrets: list[str]) -> list[str]:
     return [redact(arg, secrets) for arg in argv]
 
 
+def _label(value: Any, *, limit: int = 128) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text == "0":
+        return None
+    return text[:limit]
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number < 0 or number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _whole(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _parse_cli_json(stdout: str) -> dict[str, Any]:
+    text = stdout.strip()
+    if not text:
+        return {}
+    parsed = _json_object(text)
+    if parsed is not None:
+        return parsed
+    for line in reversed(text.splitlines()):
+        parsed = _json_object(line.strip())
+        if parsed is not None:
+            return parsed
+    return {}
+
+
+def _json_object(text: str) -> dict[str, Any] | None:
+    if not text or text[0] not in "{[":
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def _host_model(vendor: str, env: Mapping[str, str]) -> str | None:
+    if vendor != "claude":
+        return None
+    return _label(env.get("ANTHROPIC_MODEL")) or _label(env.get("CLAUDE_CODE_SUBAGENT_MODEL"))
+
+
+def _model_from_payload(payload: dict[str, Any]) -> str | None:
+    for key in ("model", "model_name", "modelName"):
+        found = _label(payload.get(key))
+        if found:
+            return found
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        found = _label(usage.get("model"))
+        if found:
+            return found
+    model_usage = payload.get("modelUsage")
+    if isinstance(model_usage, dict):
+        names = [_label(key) for key in model_usage]
+        names = [name for name in names if name]
+        if len(names) == 1:
+            return names[0]
+    return None
+
+
+def _provider_name(vendor: str, payload: dict[str, Any], usage: dict[str, Any]) -> str:
+    found = _label(payload.get("provider")) or _label(usage.get("provider"))
+    if found:
+        return found
+    return _VENDOR_PROVIDER.get(vendor, "unknown")
+
+
+def _ledger(value: Any) -> str | None:
+    text = _label(value, limit=64)
+    if text is None:
+        return None
+    lowered = text.lower()
+    if lowered in _COST_LEDGERS:
+        return lowered
+    return None
+
+
+def _marker(value: Any) -> str | None:
+    text = _label(value, limit=32)
+    if text is None:
+        return None
+    lowered = text.lower()
+    if lowered in _USAGE_MARKERS:
+        return lowered
+    return None
+
+
+def _first_usd(data: Mapping[str, Any]) -> float | None:
+    for key in _USD_COST_KEYS:
+        amount = _number(data.get(key))
+        if amount is not None:
+            return amount
+    return None
+
+
+def _vendor_cost(payload: dict[str, Any], usage: dict[str, Any]) -> tuple[float, str | None] | None:
+    amount = _first_usd(payload)
+    if amount is not None:
+        return amount, "USD"
+    amount = _first_usd(usage)
+    if amount is not None:
+        return amount, "USD"
+    model_usage = payload.get("modelUsage")
+    if isinstance(model_usage, dict) and len(model_usage) == 1:
+        entry = next(iter(model_usage.values()))
+        if isinstance(entry, dict):
+            nested = _first_usd(entry)
+            if nested is not None:
+                return nested, "USD"
+    amount = _number(usage.get("cost"))
+    if amount is not None:
+        return amount, _label(usage.get("currency"), limit=16)
+    return None
+
+
+def _token_pair(payload: dict[str, Any], usage: dict[str, Any]) -> tuple[int | None, int | None]:
+    input_tokens = _whole(usage.get("input_tokens"))
+    if input_tokens is None:
+        input_tokens = _whole(usage.get("prompt_tokens"))
+    output_tokens = _whole(usage.get("output_tokens"))
+    if output_tokens is None:
+        output_tokens = _whole(usage.get("completion_tokens"))
+    model_usage = payload.get("modelUsage")
+    if isinstance(model_usage, dict) and len(model_usage) == 1:
+        entry = next(iter(model_usage.values()))
+        if isinstance(entry, dict):
+            if input_tokens is None:
+                input_tokens = _whole(entry.get("inputTokens"))
+            if output_tokens is None:
+                output_tokens = _whole(entry.get("outputTokens"))
+    return input_tokens, output_tokens
+
+
+def _usage_report(
+    payload: dict[str, Any],
+    *,
+    model: str,
+    provider: str,
+) -> dict[str, Any] | None:
+    if not payload:
+        return None
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    marker = _marker(usage.get("marker"))
+    amount = _number(usage.get("amount"))
+    currency = _label(usage.get("currency"), limit=16)
+    source = _ledger(usage.get("source"))
+    if marker is None or amount is None:
+        found = _vendor_cost(payload, usage)
+        if found is None:
+            return None
+        amount, vendor_currency = found
+        marker = marker or "measured"
+        currency = vendor_currency or currency
+    if amount is None or marker is None:
+        return None
+    if source is None:
+        source = "api_spend" if currency == "USD" else "cli_quota"
+    report: dict[str, Any] = {"source": source, "marker": marker, "amount": amount}
+    if currency:
+        report["currency"] = currency
+    input_tokens, output_tokens = _token_pair(payload, usage)
+    if input_tokens is not None:
+        report["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        report["output_tokens"] = output_tokens
+    if model != "unknown":
+        report["model"] = model
+    if provider != "unknown":
+        report["provider"] = provider
+    return report
+
+
+def _result_usage(report: dict[str, Any]) -> UsageReport | None:
+    raw = report.get("usage")
+    if not isinstance(raw, dict):
+        return None
+    return UsageReport.model_validate(raw)
+
+
 def _base_report(
     *,
     vendor: str,
@@ -588,9 +819,16 @@ def _base_report(
     failure: str | None,
     pytest_exit_code: int | None,
 ) -> dict[str, Any]:
-    return {
+    model, provider, usage = resolve_cli_identity(
+        vendor,
+        stdout if real else "",
+        os.environ if real else {},
+    )
+    report = {
         "adapter_version": ADAPTER_VERSION,
         "vendor": vendor,
+        "model": model,
+        "provider": provider,
         "cli_invoked": invoked,
         "real_cli_invoked": real and invoked,
         "external_cli_authorized": authorized,
@@ -609,6 +847,9 @@ def _base_report(
         "probes": [asdict(probe) for probe in probes],
         "argv": argv,
     }
+    if usage is not None:
+        report["usage"] = usage
+    return report
 
 
 def _inventory(workspace: Path) -> list[dict[str, Any]]:
@@ -643,6 +884,8 @@ def _archive(workspace: Path, report: dict[str, Any]) -> Path:
     body = {
         "adapter_version": report["adapter_version"],
         "vendor": report["vendor"],
+        "model": report.get("model"),
+        "provider": report.get("provider"),
         "cli_invoked": report["cli_invoked"],
         "real_cli_invoked": report["real_cli_invoked"],
         "require_real_worker": report["require_real_worker"],

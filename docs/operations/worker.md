@@ -50,6 +50,14 @@ An isolated worktree is only a separate checkout, not OS, user, container, or VM
 
 Compatible Anthropic/OpenAI endpoints (for example MiniMax Claude) need their `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` or `OPENAI_BASE_URL` present in the host worker environment; the CliWorker sandbox allowlist passes those through to the child when set, and omits them when unset. Database URLs and GitHub tokens still never reach the child.
 
+## Model and usage on each CLI attempt
+
+A real CLI attempt records which vendor and model ran. Worker output includes `vendor`, `model`, and `provider`. The same `model` and `provider` are stored on `task_attempts` and shown by `max-agent trace <id>` and by the AER record for `attempt_finished`.
+
+Claude takes the model from CLI JSON when that JSON includes one, then from `ANTHROPIC_MODEL`, then from `CLAUDE_CODE_SUBAGENT_MODEL`. Grok and Codex use a model field in CLI JSON when present. `provider` is the JSON `provider` when set, otherwise `xai`, `openai`, or `anthropic` for those three vendors. Stub runs, and any name the CLI did not report, use the string `unknown`. The adapter does not fill a missing model or cost with `0`.
+
+When CLI JSON has `usage.marker` of `measured` or `estimate` plus an amount, that report is written to `task_attempts.cost_source`, `cost_marker`, `cost_amount`, `cost_currency`, `input_tokens`, and `output_tokens`. A vendor cost field such as `total_cost_usd` is stored as `measured` on the `api_spend` ledger. Token counts are kept only with that report. If the CLI reports no cost, those cost fields stay `unknown` or empty. Recording this does not select a model tier or escalate a run. An isolated worktree is still not OS, user, container, or VM isolation.
+
 For a local gate check or an operator-authorized live drill, run `scripts/real_cli_e2e_drill.sh` and see [evidence/real-cli-e2e-2026-10-31.md](evidence/real-cli-e2e-2026-10-31.md).
 
 ## Shutdown and recovery
