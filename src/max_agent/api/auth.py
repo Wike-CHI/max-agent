@@ -15,6 +15,14 @@ from max_agent.db.models import TaskRow
 _bearer = HTTPBearer(auto_error=False)
 
 
+def configured_principal() -> str:
+    """Single-user owner from MAX_AGENT_API_ACTOR.
+
+    Bearer auth and signed webhook creation both store this value as created_by.
+    """
+    return os.environ.get("MAX_AGENT_API_ACTOR", "user").strip()[:128] or "user"
+
+
 def require_principal(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> str:
@@ -26,7 +34,7 @@ def require_principal(
             detail="valid bearer token required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return os.environ.get("MAX_AGENT_API_ACTOR", "user").strip()[:128] or "user"
+    return configured_principal()
 
 
 def require_actor_match(principal: str, requested: str | None) -> None:

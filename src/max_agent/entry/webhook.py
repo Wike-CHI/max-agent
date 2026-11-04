@@ -74,6 +74,9 @@ def accept_inbound(session: Session, *, delivery_id: str, body: bytes, event: In
         task = service.get(existing.task_id)
         return envelope(command="webhook", task=task, deduplicated=True)
 
+    # Local import: api/__init__ loads the app, which imports this module.
+    from max_agent.api.auth import configured_principal
+
     task = service.create(
         TaskCreate(
             goal=event.goal,
@@ -84,7 +87,8 @@ def accept_inbound(session: Session, *, delivery_id: str, body: bytes, event: In
             idempotency_key=event.idempotency_key,
             has_side_effects=event.has_side_effects,
             tags=list(event.tags),
-        )
+        ),
+        created_by=configured_principal(),
     )
     session.add(
         InboundDeliveryRow(
