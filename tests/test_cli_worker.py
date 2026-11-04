@@ -11,6 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from typer.testing import CliRunner
+
+from max_agent.cli.main import app
+from max_agent.db.models import AERExportRow, TaskAttemptRow
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
 from max_agent.models.enums import EventType, TaskStatus, WorkerKind
@@ -23,6 +27,7 @@ from max_agent.workers.cli_adapter import (
     _passthrough,
     build_exec_argv,
     choose_vendor,
+    resolve_cli_identity,
 )
 from max_agent.workers.sandbox import ALLOWED_PASSTHROUGH, child_env, redact, run_bounded
 
@@ -31,6 +36,11 @@ from max_agent.workers.sandbox import ALLOWED_PASSTHROUGH, child_env, redact, ru
 def _deny_external_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", raising=False)
     monkeypatch.delenv(REQUIRE_REAL_ENV, raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SUBAGENT_MODEL", raising=False)
+
+
+_TRACE = CliRunner()
 
 
 def _outputs(session, task_id: str) -> dict:
@@ -741,3 +751,333 @@ def test_child_env_still_rejects_db_and_github_even_if_forced(
     assert "MAX_AGENT_DATABASE_URL" not in env
     assert "GITHUB_TOKEN" not in env
     assert env["ANTHROPIC_BASE_URL"] == "https://api.minimax.cn/anthropic"
+
+
+def test_resolve_cli_identity_uses_host_model_or_explicit_unknown() -> None:
+    model, provider, usage = resolve_cli_identity("claude", "", {"ANTHROPIC_MODEL": "MiniMax-M2"})
+    assert model == "MiniMax-M2"
+    assert provider == "anthropic"
+    assert usage is None
+
+    model, provider, usage = resolve_cli_identity(
+        "claude",
+        "",
+        {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-fixture"},
+    )
+    assert model == "claude-haiku-fixture"
+    assert provider == "anthropic"
+    assert usage is None
+
+    model, provider, _usage = resolve_cli_identity(
+        "claude",
+        "",
+        {"ANTHROPIC_MODEL": "from-host", "CLAUDE_CODE_SUBAGENT_MODEL": "from-subagent"},
+    )
+    assert model == "from-host"
+    assert provider == "anthropic"
+
+    model, provider, usage = resolve_cli_identity(
+        "claude",
+        "",
+        {"ANTHROPIC_MODEL": "0", "CLAUDE_CODE_SUBAGENT_MODEL": "0"},
+    )
+    assert model == "unknown"
+    assert provider == "anthropic"
+    assert usage is None
+
+    model, provider, usage = resolve_cli_identity("stub", "", {"ANTHROPIC_MODEL": "MiniMax-M2"})
+    assert model == "unknown"
+    assert provider == "unknown"
+    assert usage is None
+
+    model, provider, usage = resolve_cli_identity("grok", "not-json", {})
+    assert model == "unknown"
+    assert provider == "xai"
+    assert usage is None
+
+
+def test_resolve_cli_identity_prefers_cli_json_and_does_not_invent_cost() -> None:
+    stdout = json.dumps(
+        {
+            "model": "claude-from-json",
+            "usage": {"input_tokens": 9, "output_tokens": 4},
+        }
+    )
+    model, provider, usage = resolve_cli_identity(
+        "claude",
+        stdout,
+        {"ANTHROPIC_MODEL": "from-host"},
+    )
+    assert model == "claude-from-json"
+    assert provider == "anthropic"
+    assert usage is None
+
+    measured = json.dumps(
+        {
+            "model": 0,
+            "total_cost_usd": 0.125,
+            "usage": {"input_tokens": 11, "output_tokens": 2},
+            "modelUsage": {"claude-sonnet-fixture": {"inputTokens": 11, "outputTokens": 2, "costUSD": 0.125}},
+        }
+    )
+    model, provider, usage = resolve_cli_identity("claude", measured, {})
+    assert model == "claude-sonnet-fixture"
+    assert provider == "anthropic"
+    assert usage is not None
+    assert usage["marker"] == "measured"
+    assert usage["amount"] == 0.125
+    assert usage["currency"] == "USD"
+    assert usage["source"] == "api_spend"
+    assert usage["input_tokens"] == 11
+    assert usage["output_tokens"] == 2
+    assert usage["amount"] != 0
+
+    estimate = json.dumps(
+        {
+            "model": "grok-fixture",
+            "provider": "xai",
+            "usage": {"source": "cli_quota", "marker": "estimate", "amount": 4, "currency": "requests"},
+        }
+    )
+    model, provider, usage = resolve_cli_identity("grok", estimate, {"ANTHROPIC_MODEL": "MiniMax-M2"})
+    assert model == "grok-fixture"
+    assert provider == "xai"
+    assert usage["marker"] == "estimate"
+    assert usage["amount"] == 4
+    assert usage["source"] == "cli_quota"
+
+    explicit_zero = json.dumps({"model": "free-model", "usage": {"marker": "measured", "amount": 0, "source": "cli_quota"}})
+    _model, _provider, usage = resolve_cli_identity("codex", explicit_zero, {})
+    assert usage is not None
+    assert usage["marker"] == "measured"
+    assert usage["amount"] == 0
+    assert usage["source"] == "cli_quota"
+
+    unmarked = json.dumps({"usage": {"source": "api_spend", "amount": 3, "input_tokens": 1}})
+    model, provider, usage = resolve_cli_identity("codex", unmarked, {})
+    assert model == "unknown"
+    assert provider == "openai"
+    assert usage is None
+
+
+def _install_fake_cli(bin_dir: Path, vendor: str, stdout: str) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    version_arg = "version" if vendor == "grok" else "--version"
+    script = bin_dir / vendor
+    script.write_text(
+        f"""#!/usr/bin/env python3
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[:1] == [{version_arg!r}]:
+    print("fake 0")
+    raise SystemExit(0)
+if {vendor!r} == "grok":
+    cwd = args[args.index("--cwd") + 1]
+    Path(cwd, "calc.py").write_text("def add(a: int, b: int) -> int:\\n    return a + b\\n")
+else:
+    Path.cwd().joinpath("calc.py").write_text("def add(a: int, b: int) -> int:\\n    return a + b\\n")
+print({stdout!r})
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+
+def _attempt_row(session, task_id: str) -> TaskAttemptRow:
+    row = session.query(TaskAttemptRow).filter(TaskAttemptRow.task_id == task_id).one()
+    session.refresh(row)
+    return row
+
+
+def _finished_aer(session, task_id: str) -> dict:
+    rows = session.query(AERExportRow).filter(AERExportRow.task_id == task_id).all()
+    finished = [
+        row.body
+        for row in rows
+        if row.kind == "attempt" and row.body.get("event_type") == "attempt_finished"
+    ]
+    assert len(finished) == 1
+    return finished[0]
+
+
+def _trace_cli(task_id: str) -> dict:
+    result = _TRACE.invoke(app, ["trace", task_id])
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output)
+
+
+def test_stub_attempt_records_explicit_unknown_model_and_cost(session, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_MODEL", "MiniMax-M2")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "claude-haiku-fixture")
+    created, out = _run(
+        session,
+        "stub has no vendor model",
+        {"vendor": "stub", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    trace = _trace_cli(created.id)
+    outputs = _outputs(session, out.id)
+    assert outputs["vendor"] == "stub"
+    assert outputs["model"] == "unknown"
+    assert outputs["provider"] == "unknown"
+    assert "usage" not in outputs
+
+    attempt = _attempt_row(session, created.id)
+    assert attempt.model == "unknown"
+    assert attempt.provider == "unknown"
+    assert attempt.cost_marker == "unknown"
+    assert attempt.cost_source == "unknown"
+    assert attempt.cost_amount is None
+    assert attempt.cost_currency is None
+    assert attempt.input_tokens is None
+    assert attempt.output_tokens is None
+
+    assert trace["attempts"][0]["model"] == "unknown"
+    assert trace["attempts"][0]["provider"] == "unknown"
+    assert trace["attempts"][0]["cost"]["marker"] == "unknown"
+    assert trace["attempts"][0]["cost"]["amount"] is None
+    record = _finished_aer(session, created.id)
+    assert record["worker"]["model"] == "unknown"
+    assert record["worker"]["provider"] == "unknown"
+    assert record["cost"]["marker"] == "unknown"
+    assert record["cost"]["amount"] is None
+
+
+def test_claude_host_model_is_visible_on_attempt_trace_and_aer(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    _install_fake_cli(bin_dir, "claude", "{}")
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "claude-haiku-fixture")
+    created, out = _run(
+        session,
+        "record the configured claude model",
+        {"vendor": "claude", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    trace = _trace_cli(created.id)
+    outputs = _outputs(session, out.id)
+    assert outputs["vendor"] == "claude"
+    assert outputs["real_cli_invoked"] is True
+    assert outputs["model"] == "claude-haiku-fixture"
+    assert outputs["provider"] == "anthropic"
+    assert "usage" not in outputs
+
+    attempt = _attempt_row(session, created.id)
+    assert attempt.model == "claude-haiku-fixture"
+    assert attempt.provider == "anthropic"
+    assert attempt.cost_marker == "unknown"
+    assert attempt.cost_amount is None
+    assert attempt.input_tokens is None
+
+    assert trace["attempts"][0]["model"] == "claude-haiku-fixture"
+    assert trace["attempts"][0]["provider"] == "anthropic"
+    assert trace["attempts"][0]["cost"]["marker"] == "unknown"
+    assert trace["attempts"][0]["cost"]["amount"] is None
+    record = _finished_aer(session, created.id)
+    assert record["worker"]["model"] == "claude-haiku-fixture"
+    assert record["worker"]["provider"] == "anthropic"
+    assert record["cost"]["model"] == "claude-haiku-fixture"
+    assert record["cost"]["provider"] == "anthropic"
+    assert record["cost"]["marker"] == "unknown"
+    assert record["cost"]["amount"] is None
+
+
+def test_cli_json_model_and_usage_marker_are_stored_on_the_attempt(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = {
+        "model": "claude-from-json",
+        "usage": {
+            "source": "api_spend",
+            "marker": "measured",
+            "amount": 0.25,
+            "currency": "USD",
+            "input_tokens": 12,
+            "output_tokens": 3,
+        },
+    }
+    bin_dir = tmp_path / "bin"
+    _install_fake_cli(bin_dir, "claude", json.dumps(payload))
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "from-host")
+    created, out = _run(
+        session,
+        "record measured cli usage",
+        {"vendor": "claude", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    trace = _trace_cli(created.id)
+    outputs = _outputs(session, out.id)
+    assert outputs["vendor"] == "claude"
+    assert outputs["model"] == "claude-from-json"
+    assert outputs["provider"] == "anthropic"
+    assert outputs["usage"]["marker"] == "measured"
+    assert outputs["usage"]["amount"] == 0.25
+
+    attempt = _attempt_row(session, created.id)
+    assert attempt.model == "claude-from-json"
+    assert attempt.provider == "anthropic"
+    assert attempt.cost_source == "api_spend"
+    assert attempt.cost_marker == "measured"
+    assert attempt.cost_amount == 0.25
+    assert attempt.cost_currency == "USD"
+    assert attempt.input_tokens == 12
+    assert attempt.output_tokens == 3
+
+    assert trace["attempts"][0]["model"] == "claude-from-json"
+    assert trace["attempts"][0]["provider"] == "anthropic"
+    assert trace["attempts"][0]["cost"]["marker"] == "measured"
+    assert trace["attempts"][0]["cost"]["source"] == "api_spend"
+    assert trace["attempts"][0]["cost"]["amount"] == 0.25
+    assert trace["chain"][1]["detail"]["model"] == "claude-from-json"
+    assert trace["chain"][1]["detail"]["cost_marker"] == "measured"
+    assert trace["chain"][1]["detail"]["cost_amount"] == 0.25
+    record = _finished_aer(session, created.id)
+    assert record["worker"]["model"] == "claude-from-json"
+    assert record["worker"]["provider"] == "anthropic"
+    assert record["cost"]["marker"] == "measured"
+    assert record["cost"]["source"] == "api_spend"
+    assert record["cost"]["amount"] == 0.25
+    assert record["cost"]["currency"] == "USD"
+    assert record["cost"]["input_tokens"] == 12
+    assert record["cost"]["output_tokens"] == 3
+
+
+def test_grok_estimate_usage_is_stored_without_a_real_api_key(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = {
+        "model": "grok-fixture",
+        "usage": {"source": "cli_quota", "marker": "estimate", "amount": 4, "currency": "requests"},
+    }
+    bin_dir = tmp_path / "bin"
+    _install_fake_cli(bin_dir, "grok", json.dumps(payload))
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    created, out = _run(
+        session,
+        "record estimated grok usage",
+        {"vendor": "grok", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    attempt = _attempt_row(session, created.id)
+    assert attempt.model == "grok-fixture"
+    assert attempt.provider == "xai"
+    assert attempt.cost_source == "cli_quota"
+    assert attempt.cost_marker == "estimate"
+    assert attempt.cost_amount == 4
+    assert attempt.cost_currency == "requests"
+    record = _finished_aer(session, created.id)
+    assert record["cost"]["marker"] == "estimate"
+    assert record["cost"]["amount"] == 4
+    assert record["worker"]["model"] == "grok-fixture"
