@@ -95,7 +95,7 @@ Worker 返回 `WorkerResult.ok` 只表示执行完成；内核对照 `acceptance
 
 ## 成本与预算
 
-Worker 报告 `usage.source`（`grok_bot_quota` / `cli_quota` / `api_spend`）和 `usage.marker`（`measured` / `estimate`）。没有 marker 的数字会被丢掉。运行时只有在 attempt 的起止时间都存在时记为 `measured`。真实 CLI attempt 额外记下 `model` / `provider`：Claude 先看 CLI JSON，再看 `ANTHROPIC_MODEL`，再看 `CLAUDE_CODE_SUBAGENT_MODEL`；其他厂商只采用 CLI JSON 里的模型名。缺失时是字符串 `unknown`，不会写成 `0`。`usage.marker` 为 `measured` 或 `estimate`，或 CLI JSON 给出了费用字段时，写入 `task_attempts.cost_*`；没有报告则保持 unknown。这只做记录，不选择模型档，也不升级路由。
+Worker 报告 `usage.source`（`grok_bot_quota` / `cli_quota` / `api_spend`）和 `usage.marker`（`measured` / `estimate`）。没有 marker 的数字会被丢掉。运行时只有在 attempt 的起止时间都存在时记为 `measured`。真实 CLI attempt 额外记下 `model` / `provider`：Claude 先看 CLI JSON，再看 `ANTHROPIC_MODEL`，再看 `CLAUDE_CODE_SUBAGENT_MODEL`；其他厂商只采用 CLI JSON 里的模型名。缺失时是字符串 `unknown`，不会写成 `0`。`usage.marker` 为 `measured` 或 `estimate`，或 CLI JSON 给出了费用字段时，写入 `task_attempts.cost_*`；没有报告则保持 unknown。费用记录本身不改路由。`model_tier` 另选 vendor 档，见 `docs/operations/worker.md`；验收失败不会自动升档。
 
 `max_cost_units == 0` 表示没有总上限。`budget.ceilings` 按账本单独设上限，`0` 是真实上限。已测花费超过上限时，下一次 claim 不会拿到租约，fencing token 不变。花费未知时不拦截，预算状态为 `unknown`。审批门仍先于预算检查。
 
