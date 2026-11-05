@@ -13,10 +13,11 @@
 9. **Alembic**：已配置；MVP 也可 `init_db()` 直接 `create_all`（测试与 CLI 默认路径）。
 10. **成本**：只记录 worker 明确给出的 `measured` / `estimate`。没有报告时是 `unknown`，不会填 0，也不会调用付费 API 去补数。进程内 traces/metrics 在 `/v1/telemetry`；独立 worker 的计数器只随该进程停机日志输出，不与 API 进程共享。`MAX_AGENT_OTEL=1` 时桥接 OpenTelemetry API；未配置 collector，缺导出器不会让请求失败。
 11. **HTTP 身份是单用户 Token**：`MAX_AGENT_API_TOKEN` 保护任务、telemetry、metrics 和写接口，`MAX_AGENT_API_ACTOR` 是任务所有者与审批人。没有 OIDC、完整多租户 IAM 或自动 token rotation；远程接入必须使用 TLS 或私有隧道，未配置认证时只能放在 loopback / 私有网络。
+12. **`model_tier` 只选 vendor 档，不升级、不绕过 cc-switch**：`worker_payload.model_tier` 为 `cheap` 或 `auto` 时，授权后的 `vendor=auto` 先 Claude（兼容 `ANTHROPIC_BASE_URL`，例如 MiniMax）再 Grok，不选 Codex；`strong` 才先 Codex，再 Grok、Claude。未设置字段时仍是 Grok → Codex → Claude。未设置 `MAX_AGENT_ALLOW_EXTERNAL_CLI` 时仍走 stub / `require_real_worker`。非法档位直接 `invalid_model_tier`，不会当成 stub 成功。MAX 不调用 cc-switch，也不往 argv 写模型或端点；供应商和模型由 worker 进程里已有的允许名单环境变量决定。pytest 失败不会自动升到 `strong`。
 
 ## 下一阶段建议
 
-1. 若需要比 worktree + 进程组更强的隔离，再加容器或独立用户；当前 CLI Worker 只在显式授权且版本探测成功后调用 Grok Build、Codex 或 Claude Code。`auto` 按 Grok → Codex → Claude 顺序选择。
+1. 若需要比 worktree + 进程组更强的隔离，再加容器或独立用户；当前 CLI Worker 只在显式授权且版本探测成功后调用 Grok Build、Codex 或 Claude Code。未设置 `model_tier` 时，`vendor=auto` 按 Grok → Codex → Claude。`cheap` / `auto` / `strong` 的档位见上面第 12 条，不会在验收失败后自动升档。
 2. 生产环境切换 PostgreSQL，让多 worker 使用 SKIP LOCKED 并行抢占。
 3. 若需要完整 MCP（resources、远程托管、取消通知），在现有 stdio facade 上扩展，而不是另做一套任务库。
 4. 丰富 Verification（pytest 报告解析、artifact hash、黄金文件）。

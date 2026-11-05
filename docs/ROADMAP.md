@@ -28,6 +28,7 @@ The project has moved beyond the original MVP. Current master includes:
 - A supervised `max-worker` daemon with task claiming, heartbeats, lease renewal, and interruption recovery (#21).
 - CI, release artifacts, checksums/provenance, dependency and deployment gates, SQLite restore coverage, pre-release versioning, and Dependabot automation support (#2, #8, #22, #23; Dependabot PRs #16–#18).
 - A passing live Postgres backup/rollback/restore drill with no lost journal events (#32; evidence at [docs/operations/evidence/postgres-restore-2026-10-30.json](operations/evidence/postgres-restore-2026-10-30.json)).
+- Declared CLI model tiers (`worker_payload.model_tier`: `cheap`, `strong`, `auto`). `cheap` and `auto` prefer Claude (compatible `ANTHROPIC_BASE_URL`, for example MiniMax) then Grok, and do not lead with Codex. `strong` prefers Codex and is opt-in. Provider and model stay with cc-switch via allowlisted env; pytest does not escalate (#43, follow-up #44).
 
 This is **not a production-grade v1.0 announcement**. The `max-worker` daemon has merged via #21. The archived live Postgres restore drill now passes with no lost events (#32). The v0.5.0 GitHub pre-release is tracked separately in #33.
 
@@ -73,7 +74,7 @@ A v1.0 tag is allowed only when all of these conditions are met:
 
 ## Prioritization rationale
 
-Complete the v0.5.0 pre-release in #33 and release-candidate validation before considering v1.0. Introduce expensive model routing only when measurable outcomes exist. A UI/dashboard is optional until the task and evidence APIs stabilize.
+Complete the v0.5.0 pre-release in #33 and release-candidate validation before considering v1.0. Expensive model routing stays opt-in: #43 maps `cheap` / `auto` / `strong` onto vendor classes, and verification-triggered escalate plus a live cc-switch controller remain open (#44). A UI/dashboard is optional until the task and evidence APIs stabilize.
 
 ## Explicit non-goals
 

@@ -43,6 +43,9 @@ _SENSITIVE_MARKERS = (
     "WEBHOOK",
 )
 _SENSITIVE_PREFIXES = ("AWS_", "GITHUB_", "OPENAI_", "ANTHROPIC_", "XAI_", "GROK_")
+# Allowlisted provider env is how a model tier cooperates with cc-switch or a
+# compatible endpoint such as MiniMax. The child argv never receives --model
+# or a base URL; unset keys stay omitted.
 ALLOWED_PASSTHROUGH = frozenset(
     {
         "XAI_API_KEY",

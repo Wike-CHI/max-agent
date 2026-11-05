@@ -4,6 +4,7 @@ Contract version 1. Inputs come from WorkerContext (goal, acceptance, timeout)
 and worker_payload:
 
 - vendor: auto | stub | grok | codex | claude
+- model_tier: cheap | strong | auto. Omitted keeps today's vendor order.
 - workspace_root: directory under /tmp (or MAX_AGENT_WORKSPACE_ROOT)
 - repo_path: optional tree to copy; the source checkout is not edited
 - cancel_file: touched by the caller to SIGTERM the child
@@ -24,8 +25,15 @@ uses a model in CLI JSON, then `ANTHROPIC_MODEL`, then
 `CLAUDE_CODE_SUBAGENT_MODEL`. Other vendors use a model in CLI JSON when
 present. Missing names are the string `unknown`, never `0`. A `measured` or
 `estimate` usage report, or a vendor cost field such as `total_cost_usd`, is
-attached for the attempt row. No report leaves cost unknown. This does not
-choose a model tier or escalate.
+attached for the attempt row. No report leaves cost unknown.
+`model_tier=cheap` and `model_tier=auto` (with `vendor=auto`) prefer Claude,
+then Grok. Codex is not on that path. `model_tier=strong` prefers Codex, then
+Grok, then Claude, and is opt-in. An explicit vendor other than `auto` is
+unchanged. The selected CLI still takes its model and base URL from the
+allowlisted environment (the cc-switch cooperation point); argv does not gain
+`--model` or a provider URL. An invalid tier fails with `invalid_model_tier`
+before a stub run. Leaving `MAX_AGENT_ALLOW_EXTERNAL_CLI` unset still uses the
+stub or the `require_real_worker` gate. A pytest failure does not escalate.
 Setting `require_real_worker` in worker_payload or
 `MAX_AGENT_REQUIRE_REAL_WORKER=1` makes stub selection and any result without
 `real_cli_invoked=true` fail with `real_worker_required`.
@@ -83,12 +91,21 @@ _NON_RECOVERABLE = frozenset(
     {
         "cli_not_authorized",
         "cli_unavailable",
+        "invalid_model_tier",
         "path_violation",
         "real_worker_required",
         "worktree_failed",
     }
 )
 _VENDOR_ORDER = ("grok", "codex", "claude")
+# cheap/auto are the default bulk path and must not start on Codex.
+# strong is the only tier that prefers Codex. auto matches cheap until a
+# later change adds a bounded escalate; this module does not escalate.
+_TIER_VENDOR_ORDER = {
+    "cheap": ("claude", "grok"),
+    "auto": ("claude", "grok"),
+    "strong": ("codex", "grok", "claude"),
+}
 _VENDOR_BINARY = {"grok": "grok", "codex": "codex", "claude": "claude"}
 _VENDOR_PROVIDER = {"grok": "xai", "codex": "openai", "claude": "anthropic"}
 _COST_LEDGERS = frozenset({"grok_bot_quota", "cli_quota", "api_spend"})
@@ -163,12 +180,84 @@ def resolve_cli_identity(
     return model, provider, usage
 
 
-def choose_vendor(requested: str, probes: list[Probe], authorized: bool) -> tuple[str, str | None]:
-    """Pick a vendor. Authorized `auto` prefers Grok, Codex, then Claude."""
+class InvalidModelTier(ValueError):
+    """`model_tier` was set to something other than cheap, strong, or auto."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        super().__init__(token)
+
+
+@dataclass(frozen=True)
+class Route:
+    vendor: str
+    failure: str | None
+    model_tier: str | None
+    vendor_order: tuple[str, ...]
+
+
+def parse_model_tier(value: Any) -> str | None:
+    """Return a normalized tier, or None when the field is omitted.
+
+    Empty strings count as omitted. Any other value raises InvalidModelTier.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if not text:
+            return None
+        if text in _TIER_VENDOR_ORDER:
+            return text
+        raise InvalidModelTier(text[:64])
+    raise InvalidModelTier(type(value).__name__[:64])
+
+
+def resolve_route(
+    requested: str,
+    model_tier: Any,
+    probes: list[Probe],
+    authorized: bool,
+) -> Route:
+    """Select a vendor for `model_tier` without bypassing the CLI gate.
+
+    Omitted tier keeps `choose_vendor` (authorized `auto` is Grok, Codex, then
+    Claude). `cheap` and `auto` use Claude, then Grok, and never Codex.
+    `strong` uses Codex, then Grok, then Claude. An explicit vendor other than
+    `auto` is not reordered. An unknown tier returns `invalid_model_tier`
+    instead of a stub success. Authorization is still `choose_vendor`'s:
+    a closed external-CLI gate selects stub for `auto`, or `cli_not_authorized`
+    for an explicit real vendor.
+    """
+    try:
+        tier = parse_model_tier(model_tier)
+    except InvalidModelTier as exc:
+        return Route(vendor="stub", failure="invalid_model_tier", model_tier=exc.token, vendor_order=())
+    if requested == "auto" and tier is not None:
+        order = _TIER_VENDOR_ORDER[tier]
+        vendor, failure = choose_vendor(requested, probes, authorized, order=order)
+        return Route(vendor=vendor, failure=failure, model_tier=tier, vendor_order=order)
+    order = _VENDOR_ORDER if requested == "auto" else (requested,)
+    vendor, failure = choose_vendor(requested, probes, authorized)
+    return Route(vendor=vendor, failure=failure, model_tier=tier, vendor_order=order)
+
+
+def choose_vendor(
+    requested: str,
+    probes: list[Probe],
+    authorized: bool,
+    order: tuple[str, ...] | None = None,
+) -> tuple[str, str | None]:
+    """Pick a vendor. Authorized `auto` prefers Grok, Codex, then Claude.
+
+    `order` replaces that preference for a model tier. It does not authorize
+    a real CLI and does not read `model_tier` itself.
+    """
+    names = _VENDOR_ORDER if order is None else order
     by_name = {probe.vendor: probe for probe in probes}
     if requested == "auto":
         if authorized:
-            for name in _VENDOR_ORDER:
+            for name in names:
                 probe = by_name.get(name)
                 if probe is not None and probe.enabled:
                     return name, None
@@ -267,8 +356,15 @@ class CliWorker(Worker):
         requested = str(payload.get("vendor") or "auto")
         required = require_real_worker(payload)
         authorized = os.environ.get(ALLOW_ENV) == "1"
-        probes = probe_vendors()
-        vendor, failure = choose_vendor(requested, probes, authorized)
+        preview = resolve_route(requested, payload.get("model_tier"), [], authorized)
+        if preview.failure == "invalid_model_tier":
+            probes = []
+            route = preview
+        else:
+            probes = probe_vendors()
+            route = resolve_route(requested, payload.get("model_tier"), probes, authorized)
+        vendor = route.vendor
+        failure = route.failure
         secrets = secret_values(os.environ)
         tool_calls: list[dict[str, Any]] = []
 
@@ -278,11 +374,24 @@ class CliWorker(Worker):
             if ctx.on_tool_call:
                 ctx.on_tool_call(tool, safe_args)
 
-        note("cli.probe", {"vendor": vendor, "authorized": authorized, "failure": failure or ""})
+        note(
+            "cli.probe",
+            {
+                "vendor": vendor,
+                "authorized": authorized,
+                "failure": failure or "",
+                "model_tier": route.model_tier or "",
+            },
+        )
         if failure is None and required and vendor == "stub":
             failure = "real_worker_required"
         if failure:
-            summary = "stub refused because a real CLI worker is required" if failure == "real_worker_required" else failure
+            if failure == "invalid_model_tier":
+                summary = f"invalid model_tier {route.model_tier!r}; expected cheap, strong, or auto"
+            elif failure == "real_worker_required":
+                summary = "stub refused because a real CLI worker is required"
+            else:
+                summary = failure
             return self._finish(
                 ok=False,
                 summary=summary,
@@ -294,6 +403,8 @@ class CliWorker(Worker):
                 tool_calls=tool_calls,
                 secrets=secrets,
                 error=summary,
+                model_tier=route.model_tier,
+                route_vendors=route.vendor_order,
             )
 
         try:
@@ -310,6 +421,8 @@ class CliWorker(Worker):
                 tool_calls=tool_calls,
                 secrets=secrets,
                 error=str(exc),
+                model_tier=route.model_tier,
+                route_vendors=route.vendor_order,
             )
 
         try:
@@ -331,6 +444,8 @@ class CliWorker(Worker):
                 tool_calls=tool_calls,
                 secrets=secrets,
                 error=redact(str(exc), secrets),
+                model_tier=route.model_tier,
+                route_vendors=route.vendor_order,
             )
 
         meta = workspace / ".max-agent"
@@ -420,6 +535,8 @@ class CliWorker(Worker):
             truncated=ran.truncated or pytest_truncated,
             failure=failure,
             pytest_exit_code=pytest_exit,
+            model_tier=route.model_tier,
+            route_vendors=route.vendor_order,
         )
         report["pytest_stdout"] = pytest_stdout
         manifest = _archive(workspace, report)
@@ -450,6 +567,8 @@ class CliWorker(Worker):
         tool_calls: list[dict[str, Any]],
         secrets: list[str],
         error: str | None,
+        model_tier: str | None,
+        route_vendors: tuple[str, ...],
     ) -> WorkerResult:
         report = _base_report(
             vendor=vendor,
@@ -468,6 +587,8 @@ class CliWorker(Worker):
             truncated=False,
             failure=failure,
             pytest_exit_code=None,
+            model_tier=model_tier,
+            route_vendors=route_vendors,
         )
         report["stdout"] = redact(report["stdout"], secrets)
         return WorkerResult(
@@ -818,6 +939,8 @@ def _base_report(
     truncated: bool,
     failure: str | None,
     pytest_exit_code: int | None,
+    model_tier: str | None = None,
+    route_vendors: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     model, provider, usage = resolve_cli_identity(
         vendor,
@@ -829,6 +952,8 @@ def _base_report(
         "vendor": vendor,
         "model": model,
         "provider": provider,
+        "model_tier": model_tier,
+        "route_vendors": list(route_vendors),
         "cli_invoked": invoked,
         "real_cli_invoked": real and invoked,
         "external_cli_authorized": authorized,
@@ -886,6 +1011,8 @@ def _archive(workspace: Path, report: dict[str, Any]) -> Path:
         "vendor": report["vendor"],
         "model": report.get("model"),
         "provider": report.get("provider"),
+        "model_tier": report.get("model_tier"),
+        "route_vendors": list(report.get("route_vendors") or []),
         "cli_invoked": report["cli_invoked"],
         "real_cli_invoked": report["real_cli_invoked"],
         "require_real_worker": report["require_real_worker"],

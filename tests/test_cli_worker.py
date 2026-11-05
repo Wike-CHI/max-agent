@@ -23,11 +23,14 @@ from max_agent.workers.cli_adapter import (
     ADAPTER_VERSION,
     FORBIDDEN_CLI_FLAGS,
     REQUIRE_REAL_ENV,
+    InvalidModelTier,
     Probe,
     _passthrough,
     build_exec_argv,
     choose_vendor,
+    parse_model_tier,
     resolve_cli_identity,
+    resolve_route,
 )
 from max_agent.workers.sandbox import ALLOWED_PASSTHROUGH, child_env, redact, run_bounded
 
@@ -190,6 +193,88 @@ def test_choose_vendor_authorization_and_auto_preference() -> None:
     assert choose_vendor("auto", enabled[2:], authorized=True) == ("claude", None)
     failed_probe = [Probe(vendor="claude", available=True, enabled=False, reason="version_probe_failed")]
     assert choose_vendor("claude", failed_probe, authorized=True) == ("claude", "cli_unavailable")
+
+
+def _enabled_probes() -> list[Probe]:
+    return [
+        Probe(vendor="grok", available=True, enabled=True, reason="ok", binary="/bin/grok"),
+        Probe(vendor="codex", available=True, enabled=True, reason="ok", binary="/bin/codex"),
+        Probe(vendor="claude", available=True, enabled=True, reason="ok", binary="/bin/claude"),
+    ]
+
+
+def test_parse_model_tier_accepts_only_cheap_strong_and_auto() -> None:
+    assert parse_model_tier(None) is None
+    assert parse_model_tier("") is None
+    assert parse_model_tier("  ") is None
+    assert parse_model_tier("Cheap") == "cheap"
+    assert parse_model_tier(" AUTO ") == "auto"
+    with pytest.raises(InvalidModelTier) as bad:
+        parse_model_tier("pro")
+    assert bad.value.token == "pro"
+    with pytest.raises(InvalidModelTier):
+        parse_model_tier(1)
+
+
+def test_resolve_route_maps_cheap_auto_and_strong_without_leading_codex() -> None:
+    enabled = _enabled_probes()
+    legacy = resolve_route("auto", None, enabled, authorized=True)
+    assert (legacy.vendor, legacy.failure, legacy.model_tier) == ("grok", None, None)
+    assert legacy.vendor_order == ("grok", "codex", "claude")
+
+    cheap = resolve_route("auto", "cheap", enabled, authorized=True)
+    auto = resolve_route("auto", "auto", enabled, authorized=True)
+    assert cheap.vendor == "claude"
+    assert cheap.failure is None
+    assert cheap.model_tier == "cheap"
+    assert cheap.vendor_order == ("claude", "grok")
+    assert cheap.vendor_order[0] != "codex"
+    assert (auto.vendor, auto.vendor_order) == (cheap.vendor, cheap.vendor_order)
+
+    strong = resolve_route("auto", "strong", enabled, authorized=True)
+    assert strong.vendor == "codex"
+    assert strong.model_tier == "strong"
+    assert strong.vendor_order == ("codex", "grok", "claude")
+
+    claude_down = [
+        Probe(vendor="grok", available=True, enabled=True, reason="ok", binary="/bin/grok"),
+        Probe(vendor="codex", available=True, enabled=True, reason="ok", binary="/bin/codex"),
+        Probe(vendor="claude", available=True, enabled=False, reason="version_probe_failed"),
+    ]
+    assert resolve_route("auto", "cheap", claude_down, authorized=True).vendor == "grok"
+    assert resolve_route("auto", "strong", claude_down, authorized=True).vendor == "codex"
+
+    only_claude = [
+        Probe(vendor="grok", available=False, enabled=False, reason="not_on_path"),
+        Probe(vendor="codex", available=False, enabled=False, reason="not_on_path"),
+        Probe(vendor="claude", available=True, enabled=True, reason="ok", binary="/bin/claude"),
+    ]
+    assert resolve_route("auto", "strong", only_claude, authorized=True).vendor == "claude"
+
+    only_codex = [
+        Probe(vendor="grok", available=False, enabled=False, reason="not_on_path"),
+        Probe(vendor="codex", available=True, enabled=True, reason="ok", binary="/bin/codex"),
+        Probe(vendor="claude", available=False, enabled=False, reason="not_on_path"),
+    ]
+    cheap_miss = resolve_route("auto", "cheap", only_codex, authorized=True)
+    assert cheap_miss.vendor == "stub"
+    assert cheap_miss.failure is None
+    assert "codex" not in cheap_miss.vendor_order
+
+    unauthorized = resolve_route("auto", "strong", enabled, authorized=False)
+    assert unauthorized.vendor == "stub"
+    assert unauthorized.failure is None
+    assert unauthorized.model_tier == "strong"
+
+    pinned = resolve_route("grok", "cheap", enabled, authorized=True)
+    assert pinned.vendor == "grok"
+    assert pinned.failure is None
+    denied = resolve_route("grok", "cheap", enabled, authorized=False)
+    assert denied.failure == "cli_not_authorized"
+
+    invalid = resolve_route("stub", "gpt-pro", enabled, authorized=False)
+    assert invalid.failure == "invalid_model_tier"
+    assert invalid.model_tier == "gpt-pro"
 
 
 def test_require_real_worker_rejects_stub_success(session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1081,3 +1166,249 @@ def test_grok_estimate_usage_is_stored_without_a_real_api_key(
     assert record["cost"]["marker"] == "estimate"
     assert record["cost"]["amount"] == 4
     assert record["worker"]["model"] == "grok-fixture"
+
+
+def _install_tier_cli(bin_dir: Path, vendor: str, log: Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    version_arg = "version" if vendor == "grok" else "--version"
+    script = bin_dir / vendor
+    script.write_text(
+        f"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+log = Path({str(log)!r})
+rows = json.loads(log.read_text()) if log.exists() else []
+args = sys.argv[1:]
+rows.append({{
+    "vendor": {vendor!r},
+    "argv": args,
+    "anthropic_base_url": os.environ.get("ANTHROPIC_BASE_URL", ""),
+    "has_anthropic_key": "ANTHROPIC_API_KEY" in os.environ,
+    "has_openai_base": "OPENAI_BASE_URL" in os.environ,
+    "has_github": "GITHUB_TOKEN" in os.environ,
+}})
+log.write_text(json.dumps(rows))
+if args[:1] == [{version_arg!r}]:
+    raise SystemExit(0)
+if {vendor!r} == "grok":
+    cwd = args[args.index("--cwd") + 1]
+    Path(cwd, "calc.py").write_text("def add(a: int, b: int) -> int:\\n    return a + b\\n")
+elif {vendor!r} == "codex":
+    Path.cwd().joinpath("calc.py").write_text("def add(a: int, b: int) -> int:\\n    return a + b\\n")
+else:
+    Path.cwd().joinpath("calc.py").write_text("def add(a: int, b: int) -> int:\\n    return a + b\\n")
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+
+def _exec_rows(log: Path) -> list[dict]:
+    rows = json.loads(log.read_text(encoding="utf-8"))
+    return [row for row in rows if row["argv"] not in (["version"], ["--version"])]
+
+
+def test_invalid_model_tier_fails_instead_of_stub_success(session, tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    _created, out = _run(
+        session,
+        "reject an unknown tier",
+        {"vendor": "stub", "model_tier": "gpt-pro", "workspace_root": str(workspace)},
+        criteria=["worker_ok"],
+    )
+    assert out.status == TaskStatus.FAILED
+    outputs = _outputs(session, out.id)
+    assert outputs["adapter_failure"] == "invalid_model_tier"
+    assert outputs["model_tier"] == "gpt-pro"
+    assert outputs["cli_invoked"] is False
+    assert outputs["real_cli_invoked"] is False
+    assert outputs["vendor"] == "stub"
+    assert not workspace.exists()
+    assert "invalid model_tier" in (out.last_error or "")
+
+
+def test_valid_tier_without_external_cli_stays_on_the_stub_gate(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _created, out = _run(
+        session,
+        "cheap tier still stubs when the gate is closed",
+        {"vendor": "auto", "model_tier": "cheap", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    outputs = _outputs(session, out.id)
+    assert outputs["vendor"] == "stub"
+    assert outputs["model_tier"] == "cheap"
+    assert outputs["route_vendors"] == ["claude", "grok"]
+    assert outputs["real_cli_invoked"] is False
+    assert outputs["external_cli_authorized"] is False
+    assert "codex" not in outputs["route_vendors"]
+
+    monkeypatch.setenv(REQUIRE_REAL_ENV, "1")
+    _created, required = _run(
+        session,
+        "strong tier cannot skip the real-worker gate",
+        {"vendor": "auto", "model_tier": "strong", "workspace_root": str(tmp_path / "required")},
+        criteria=["worker_ok"],
+    )
+    assert required.status == TaskStatus.FAILED
+    required_outputs = _outputs(session, required.id)
+    assert required_outputs["adapter_failure"] == "real_worker_required"
+    assert required_outputs["model_tier"] == "strong"
+    assert required_outputs["cli_invoked"] is False
+    assert required_outputs["real_cli_invoked"] is False
+    assert required_outputs["require_real_worker"] is True
+
+
+def test_authorized_cheap_and_auto_prefer_claude_and_pass_base_url(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    log = tmp_path / "cli.log"
+    for vendor in ("grok", "codex", "claude"):
+        _install_tier_cli(bin_dir, vendor, log)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.minimax.example/anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-LIVEKEY123456")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "MiniMax-M2")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://codex.example/v1")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_LIVEKEY12345678")
+    _created, cheap = _run(
+        session,
+        "cheap tier uses claude",
+        {"vendor": "auto", "model_tier": "cheap", "workspace_root": str(tmp_path / "cheap")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert cheap.status == TaskStatus.SUCCEEDED, cheap.last_error
+    outputs = _outputs(session, cheap.id)
+    assert outputs["vendor"] == "claude"
+    assert outputs["model_tier"] == "cheap"
+    assert outputs["route_vendors"] == ["claude", "grok"]
+    assert outputs["model"] == "MiniMax-M2"
+    assert outputs["provider"] == "anthropic"
+    assert outputs["real_cli_invoked"] is True
+    exec_rows = _exec_rows(log)
+    assert {row["vendor"] for row in exec_rows} == {"claude"}
+    assert exec_rows[0]["anthropic_base_url"] == "https://api.minimax.example/anthropic"
+    assert exec_rows[0]["has_anthropic_key"] is True
+    assert exec_rows[0]["has_openai_base"] is False
+    assert exec_rows[0]["has_github"] is False
+    assert "--model" not in exec_rows[0]["argv"]
+    assert "https://api.minimax.example/anthropic" not in exec_rows[0]["argv"]
+    assert "MiniMax-M2" not in exec_rows[0]["argv"]
+
+    log.unlink()
+    _created, auto = _run(
+        session,
+        "auto tier stays on the cheap path",
+        {"vendor": "auto", "model_tier": "auto", "workspace_root": str(tmp_path / "auto-tier")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert auto.status == TaskStatus.SUCCEEDED, auto.last_error
+    auto_outputs = _outputs(session, auto.id)
+    assert auto_outputs["vendor"] == "claude"
+    assert auto_outputs["model_tier"] == "auto"
+    assert auto_outputs["route_vendors"] == ["claude", "grok"]
+    assert {row["vendor"] for row in _exec_rows(log)} == {"claude"}
+
+
+def test_authorized_strong_prefers_codex_and_falls_back_without_using_argv_model(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    log = tmp_path / "strong.log"
+    for vendor in ("grok", "codex", "claude"):
+        _install_tier_cli(bin_dir, vendor, log)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://codex.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-LIVEKEY123")
+    _created, strong = _run(
+        session,
+        "strong tier uses codex",
+        {"vendor": "auto", "model_tier": "strong", "workspace_root": str(tmp_path / "strong")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert strong.status == TaskStatus.SUCCEEDED, strong.last_error
+    outputs = _outputs(session, strong.id)
+    assert outputs["vendor"] == "codex"
+    assert outputs["model_tier"] == "strong"
+    assert outputs["route_vendors"] == ["codex", "grok", "claude"]
+    assert outputs["real_cli_invoked"] is True
+    exec_rows = _exec_rows(log)
+    assert {row["vendor"] for row in exec_rows} == {"codex"}
+    assert exec_rows[0]["has_openai_base"] is True
+    assert "--model" not in exec_rows[0]["argv"]
+    assert "https://codex.example/v1" not in exec_rows[0]["argv"]
+
+    fallback_bin = tmp_path / "fallback-bin"
+    fallback_log = tmp_path / "fallback.log"
+    for vendor in ("grok", "claude"):
+        _install_tier_cli(fallback_bin, vendor, fallback_log)
+    monkeypatch.setenv("PATH", f"{fallback_bin}:/usr/bin:/bin")
+    _created, fallback = _run(
+        session,
+        "strong tier falls back to grok",
+        {"vendor": "auto", "model_tier": "strong", "workspace_root": str(tmp_path / "fallback")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert fallback.status == TaskStatus.SUCCEEDED, fallback.last_error
+    fallback_outputs = _outputs(session, fallback.id)
+    assert fallback_outputs["vendor"] == "grok"
+    assert fallback_outputs["model_tier"] == "strong"
+    assert {row["vendor"] for row in _exec_rows(fallback_log)} == {"grok"}
+
+
+def test_authorized_cheap_does_not_execute_codex_when_claude_and_grok_are_absent(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    log = tmp_path / "codex-only.log"
+    _install_tier_cli(bin_dir, "codex", log)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv(REQUIRE_REAL_ENV, "1")
+    _created, out = _run(
+        session,
+        "cheap must not spend a codex probe as its worker",
+        {"vendor": "auto", "model_tier": "cheap", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok"],
+    )
+    assert out.status == TaskStatus.FAILED
+    outputs = _outputs(session, out.id)
+    assert outputs["adapter_failure"] == "real_worker_required"
+    assert outputs["vendor"] == "stub"
+    assert outputs["model_tier"] == "cheap"
+    assert outputs["real_cli_invoked"] is False
+    assert outputs["cli_invoked"] is False
+    assert _exec_rows(log) == []
+
+
+def test_explicit_vendor_wins_over_model_tier(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    log = tmp_path / "pinned.log"
+    for vendor in ("grok", "codex", "claude"):
+        _install_tier_cli(bin_dir, vendor, log)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    _created, out = _run(
+        session,
+        "pinned grok stays grok",
+        {
+            "vendor": "grok",
+            "model_tier": "cheap",
+            "workspace_root": str(tmp_path / "ws"),
+        },
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    outputs = _outputs(session, out.id)
+    assert outputs["vendor"] == "grok"
+    assert outputs["model_tier"] == "cheap"
+    assert outputs["route_vendors"] == ["grok"]
+    assert {row["vendor"] for row in _exec_rows(log)} == {"grok"}

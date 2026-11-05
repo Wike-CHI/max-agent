@@ -50,13 +50,34 @@ An isolated worktree is only a separate checkout, not OS, user, container, or VM
 
 Compatible Anthropic/OpenAI endpoints (for example MiniMax Claude) need their `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` or `OPENAI_BASE_URL` present in the host worker environment; the CliWorker sandbox allowlist passes those through to the child when set, and omits them when unset. Database URLs and GitHub tokens still never reach the child.
 
+## Model tier (`cheap` / `strong` / `auto`)
+
+A task may set `worker_payload.model_tier` to `cheap`, `strong`, or `auto`. Most tasks should use `cheap` or `auto` (about 80% of default work). `strong` is opt-in and is the only tier that prefers Codex / GPT Pro class CLIs. Omit the field to keep today's vendor selection.
+
+| `model_tier` | `vendor=auto` order | Endpoint and model |
+| --- | --- | --- |
+| omitted | Grok, then Codex, then Claude | Unchanged historical `auto` |
+| `cheap` | Claude, then Grok. Codex is not a candidate | Claude child receives allowlisted `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL` when the worker process has them. Point `ANTHROPIC_BASE_URL` at a compatible endpoint such as MiniMax |
+| `auto` | Same as `cheap` | Same env as `cheap`. This does not escalate after pytest |
+| `strong` | Codex, then Grok, then Claude | Codex child receives allowlisted `OPENAI_API_KEY` and `OPENAI_BASE_URL` when set |
+
+An explicit `vendor` other than `auto` (`stub`, `grok`, `codex`, or `claude`) still wins. The tier is recorded as `model_tier` and does not reorder that vendor. Worker output also lists `route_vendors` for the order that was considered.
+
+Any other value fails before a worktree or stub run: `adapter_failure` is `invalid_model_tier`, `cli_invoked` is false, and the summary names the rejected value. That failure is not retried as a stub success.
+
+`MAX_AGENT_ALLOW_EXTERNAL_CLI` unset does not start a real CLI. `vendor=auto` with a valid tier still uses the stub, and `require_real_worker` still returns `real_worker_required`. The tier does not open the external-CLI gate.
+
+MAX does not put `--model` or a provider URL on the CLI argv. [cc-switch](https://github.com/farion1231/cc-switch) is the intended controller for provider and model: in its routing mode it points Claude's `ANTHROPIC_BASE_URL` at the local route (default `http://127.0.0.1:15721`) from the app settings file. This adapter does not spawn cc-switch and does not read `~/.claude/settings.json`. The child `HOME` is the isolated worktree home, so that settings file is not visible to the CLI. Cooperation is the allowlisted environment above: export the endpoint and model cc-switch selected into the worker process. Do not hardcode a MiniMax URL or a GPT Pro model name in MAX. A later change can ask cc-switch to apply a cheap or strong profile; this ticket does not.
+
+Pytest failure does not switch a run to `strong`. That escalate is a separate change.
+
 ## Model and usage on each CLI attempt
 
 A real CLI attempt records which vendor and model ran. Worker output includes `vendor`, `model`, and `provider`. The same `model` and `provider` are stored on `task_attempts` and shown by `max-agent trace <id>` and by the AER record for `attempt_finished`.
 
 Claude takes the model from CLI JSON when that JSON includes one, then from `ANTHROPIC_MODEL`, then from `CLAUDE_CODE_SUBAGENT_MODEL`. Grok and Codex use a model field in CLI JSON when present. `provider` is the JSON `provider` when set, otherwise `xai`, `openai`, or `anthropic` for those three vendors. Stub runs, and any name the CLI did not report, use the string `unknown`. The adapter does not fill a missing model or cost with `0`.
 
-When CLI JSON has `usage.marker` of `measured` or `estimate` plus an amount, that report is written to `task_attempts.cost_source`, `cost_marker`, `cost_amount`, `cost_currency`, `input_tokens`, and `output_tokens`. A vendor cost field such as `total_cost_usd` is stored as `measured` on the `api_spend` ledger. Token counts are kept only with that report. If the CLI reports no cost, those cost fields stay `unknown` or empty. Recording this does not select a model tier or escalate a run. An isolated worktree is still not OS, user, container, or VM isolation.
+When CLI JSON has `usage.marker` of `measured` or `estimate` plus an amount, that report is written to `task_attempts.cost_source`, `cost_marker`, `cost_amount`, `cost_currency`, `input_tokens`, and `output_tokens`. A vendor cost field such as `total_cost_usd` is stored as `measured` on the `api_spend` ledger. Token counts are kept only with that report. If the CLI reports no cost, those cost fields stay `unknown` or empty. Recording usage does not escalate a run. Tier selection is the `model_tier` field above; a pytest failure does not switch tiers. An isolated worktree is still not OS, user, container, or VM isolation.
 
 For a local gate check or an operator-authorized live drill, run `scripts/real_cli_e2e_drill.sh` and see [evidence/real-cli-e2e-2026-10-31.md](evidence/real-cli-e2e-2026-10-31.md).
 
