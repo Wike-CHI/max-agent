@@ -36,15 +36,20 @@ def test_local_code_write_and_pytest(session, tmp_path: Path):
     assert demo.is_file()
 
 
-def test_local_code_rejects_existing_test_outside_allowlist(session) -> None:
-    forbidden = Path.home() / "max_agent_forbidden_test.py"
-    marker = Path("/tmp/max_agent_forbidden_marker")
+def test_local_code_rejects_existing_test_outside_allowlist(session, tmp_path: Path, monkeypatch) -> None:
+    # Keep the regression hermetic even when HOME is read-only. Production roots
+    # are unchanged; only this test uses one isolated allowed directory.
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.setattr("max_agent.workers.local_code._LOCAL_ROOTS", (allowed,))
+    forbidden = tmp_path / "max_agent_forbidden_test.py"
+    marker = tmp_path / "max_agent_forbidden_marker"
     if marker.exists():
         marker.unlink()
     forbidden.write_text(
         "from pathlib import Path\n\n"
         "def test_should_not_run():\n"
-        "    Path('/tmp/max_agent_forbidden_marker').write_text('ran')\n",
+        f"    Path({str(marker)!r}).write_text('ran')\n",
         encoding="utf-8",
     )
     try:
@@ -54,29 +59,34 @@ def test_local_code_rejects_existing_test_outside_allowlist(session) -> None:
                 goal="pytest an existing file outside the allowlist",
                 acceptance_criteria=["worker_ok"],
                 worker_kind=WorkerKind.LOCAL_CODE,
-                worker_payload={"action": "run_pytest", "test_path": str(forbidden)},
+                worker_payload={"action": "run_pytest", "test_path": str(forbidden),
+                                "path": str(allowed / "target.py")},
             )
         )
         out = Scheduler(session).run_one(task.id)
         assert out.status == TaskStatus.FAILED
         assert out.last_error and "refusing" in out.last_error
+        assert str(forbidden) in out.last_error
         assert not marker.exists()
     finally:
         forbidden.unlink(missing_ok=True)
         marker.unlink(missing_ok=True)
 
 
-def test_local_code_rejects_symlink_that_resolves_outside_allowlist(session) -> None:
-    secret = Path.home() / "max_agent_secret_test.py"
-    link = Path("/tmp/max_agent_test_link.py")
-    marker = Path("/tmp/max_agent_symlink_marker")
+def test_local_code_rejects_symlink_that_resolves_outside_allowlist(session, tmp_path: Path, monkeypatch) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.setattr("max_agent.workers.local_code._LOCAL_ROOTS", (allowed,))
+    secret = tmp_path / "max_agent_secret_test.py"
+    link = allowed / "max_agent_test_link.py"
+    marker = tmp_path / "max_agent_symlink_marker"
     for path in (link, marker):
         if path.exists() or path.is_symlink():
             path.unlink()
     secret.write_text(
         "from pathlib import Path\n\n"
         "def test_should_not_run():\n"
-        "    Path('/tmp/max_agent_symlink_marker').write_text('ran')\n",
+        f"    Path({str(marker)!r}).write_text('ran')\n",
         encoding="utf-8",
     )
     link.symlink_to(secret)
@@ -87,12 +97,14 @@ def test_local_code_rejects_symlink_that_resolves_outside_allowlist(session) -> 
                 goal="pytest through a symlink",
                 acceptance_criteria=["worker_ok"],
                 worker_kind=WorkerKind.LOCAL_CODE,
-                worker_payload={"action": "run_pytest", "test_path": str(link)},
+                worker_payload={"action": "run_pytest", "test_path": str(link),
+                                "path": str(allowed / "target.py")},
             )
         )
         out = Scheduler(session).run_one(task.id)
         assert out.status == TaskStatus.FAILED
         assert out.last_error and "refusing" in out.last_error
+        assert str(secret) in out.last_error
         assert not marker.exists()
     finally:
         secret.unlink(missing_ok=True)

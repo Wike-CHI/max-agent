@@ -1,0 +1,21 @@
+{
+  "name": "max-agent-console-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/worker.test.mjs",
+    "check": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "dev": "wrangler dev --ip 127.0.0.1",
+    "deploy": "wrangler deploy",
+    "test:runtime": "node --test test/runtime.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.158.0",
+    "miniflare": "5.20261104.0-beta"
+  }
+}

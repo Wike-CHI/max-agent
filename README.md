@@ -136,6 +136,43 @@ Every task read/write, queue operation, telemetry, metrics, and AER retry reques
 
 Webhook requests need `MAX_AGENT_WEBHOOK_SECRET` plus headers `X-Max-Timestamp`, `X-Max-Signature` (hex HMAC-SHA256 of `{timestamp}.{raw_body}`), and `X-Max-Delivery-Id`. Replays of the same delivery id return the original task. A new delivery with the same `idempotency_key` attaches to that task and does not start a second one. The handler does not run the worker. The task it creates is owned by the same `MAX_AGENT_API_ACTOR` principal as API-created tasks.
 
+## Read-only MAX console
+
+The console shows the same task database used by HTTP and MCP, at `/console/`.
+It does not submit, approve, cancel, retry, or execute tasks.
+
+```bash
+# Node.js 24 is used in CI. Build once; no Node server is needed at runtime.
+cd frontend
+npm ci
+npm test
+npm run build
+cd ..
+
+# Use the same explicit DB URL for API, MCP, and the worker process.
+export MAX_AGENT_DATABASE_URL=sqlite:////absolute/path/to/max_agent.db
+export MAX_AGENT_API_ACTOR=user
+# Set MAX_AGENT_API_TOKEN securely before starting; never commit it.
+uv run alembic upgrade head
+uv run max-agent serve --host 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080/console/` and enter the configured token. The page
+holds it only in memory and forgets it when disconnected or reloaded. The token
+still has its original API privileges; a read-only page is not a read-only credential.
+
+Agent callers can use `max_list_tasks`, `max_events_query`, and `max_trace` through
+`max-agent mcp`, or the authenticated HTTP query endpoints. HTTP and MCP use the
+same `MAX_AGENT_API_ACTOR` owner. The legacy local CLI remains an administrative
+interface: `create` defaults to owner `user`, and reads are not owner-scoped.
+
+See [console operations and query contracts](docs/console.md) for pagination,
+identity, truthful execution/cost labels, packaging, and limitations.
+
+For free Cloudflare hosting and Git-based console updates, see
+[Cloudflare Workers deployment](docs/cloudflare.md). This hosts the UI and a
+read-only proxy; the Python API and Task DB need a separate reachable backend.
+
 ## Tests
 
 ```bash

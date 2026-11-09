@@ -222,3 +222,15 @@ class VerificationResult(BaseModel):
     passed: bool
     checks: list[dict[str, Any]] = Field(default_factory=list)
     message: str = ""
+
+
+class TaskPage(BaseModel):
+    items: list[TaskRead]
+    total: int
+    next_cursor: str | None = None
+
+
+class TaskEventPage(BaseModel):
+    items: list[TaskEventRead]
+    next_cursor: str | None = None
+    has_more: bool

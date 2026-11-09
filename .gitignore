@@ -15,3 +15,5 @@ data/*.db-*
 dist/
 htmlcov/
 venv/
+node_modules/
+frontend/coverage/

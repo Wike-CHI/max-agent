@@ -12,10 +12,12 @@ from collections.abc import Callable
 from typing import Any
 
 from max_agent import __version__
+from max_agent.api.auth import configured_principal
+from max_agent.kernel.query import TaskQuery
 from max_agent.db.session import session_scope
 from max_agent.entry.contract import envelope
 from max_agent.kernel.service import TaskService
-from max_agent.models.enums import WorkerKind
+from max_agent.models.enums import TaskStatus, WorkerKind
 from max_agent.models.schemas import TaskCreate
 
 PROTOCOL = "2024-11-05"
@@ -35,43 +37,54 @@ def _create(arguments: dict[str, Any]) -> dict[str, Any]:
         dependencies=list(arguments.get("dependencies") or []),
     )
     with session_scope() as session:
-        task = TaskService(session).create(data)
+        task = TaskService(session).create(data, created_by=configured_principal())
     return envelope(command="max_create", task=task)
 
 
 def _status(arguments: dict[str, Any]) -> dict[str, Any]:
     task_id = str(arguments["task_id"])
     with session_scope() as session:
+        TaskQuery(session, configured_principal()).authorize(task_id)
         service = TaskService(session)
         task = service.get(task_id)
         events = service.list_events(task_id)
-    return envelope(command="max_status", task=task, events=events)
+        verification = service.latest_verification(task_id)
+    return envelope(command="max_status", task=task, events=events, verification=verification)
 
 
 def _events(arguments: dict[str, Any]) -> dict[str, Any]:
     task_id = str(arguments["task_id"])
-    limit = int(arguments.get("limit") or 200)
+    limit = arguments.get("limit", 200)
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError("limit must be between 1 and 1000")
     with session_scope() as session:
+        TaskQuery(session, configured_principal()).authorize(task_id)
         service = TaskService(session)
         task = service.get(task_id)
         events = service.list_events(task_id, limit=limit)
-    return envelope(command="max_events", task=task, events=events)
+        verification = service.latest_verification(task_id)
+    return envelope(command="max_events", task=task, events=events, verification=verification)
 
 
 def _cancel(arguments: dict[str, Any]) -> dict[str, Any]:
     task_id = str(arguments["task_id"])
     with session_scope() as session:
+        TaskQuery(session, configured_principal()).authorize(task_id)
         task = TaskService(session).cancel(task_id)
     return envelope(command="max_cancel", task=task)
 
 
 def _approve(arguments: dict[str, Any]) -> dict[str, Any]:
     task_id = str(arguments["task_id"])
-    actor = str(arguments.get("actor") or "user")
+    actor = configured_principal()
+    requested_actor = arguments.get("actor")
+    if requested_actor is not None and requested_actor != actor:
+        raise PermissionError("actor must match configured principal")
     note = str(arguments.get("note") or "")
     scope = list(arguments.get("scope") or [])
     ttl = arguments.get("ttl_seconds")
     with session_scope() as session:
+        TaskQuery(session, actor).authorize(task_id)
         task = TaskService(session).approve(
             task_id,
             actor=actor,
@@ -84,14 +97,43 @@ def _approve(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _reject(arguments: dict[str, Any]) -> dict[str, Any]:
     task_id = str(arguments["task_id"])
-    actor = str(arguments.get("actor") or "user")
+    actor = configured_principal()
+    requested_actor = arguments.get("actor")
+    if requested_actor is not None and requested_actor != actor:
+        raise PermissionError("actor must match configured principal")
     note = str(arguments.get("note") or "")
     with session_scope() as session:
+        TaskQuery(session, actor).authorize(task_id)
         task = TaskService(session).reject(task_id, actor=actor, note=note)
     return envelope(command="max_reject", task=task)
 
 
+def _list_tasks(arguments: dict[str, Any]) -> dict[str, Any]:
+    with session_scope() as session:
+        page = TaskQuery(session, configured_principal()).tasks(
+            q=arguments.get("q", ""), status=arguments.get("status"),
+            limit=arguments.get("limit", 25), cursor=arguments.get("cursor"))
+        return page.model_dump(mode="json")
+
+
+def _events_query(arguments: dict[str, Any]) -> dict[str, Any]:
+    with session_scope() as session:
+        return TaskQuery(session, configured_principal()).events(
+            str(arguments["task_id"]), limit=arguments.get("limit", 50),
+            cursor=arguments.get("cursor")).model_dump(mode="json")
+
+
+def _trace(arguments: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(arguments["task_id"])
+    with session_scope() as session:
+        TaskQuery(session, configured_principal()).authorize(task_id)
+        return TaskService(session).trace(task_id).model_dump(mode="json")
+
+
 _TOOL_FNS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "max_list_tasks": _list_tasks,
+    "max_events_query": _events_query,
+    "max_trace": _trace,
     "max_create": _create,
     "max_status": _status,
     "max_events": _events,
@@ -103,6 +145,31 @@ _TOOL_FNS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 
 def tool_specs() -> list[dict[str, Any]]:
     return [
+        {
+            "name": "max_list_tasks",
+            "description": "Search owned tasks, newest first, without executing work.",
+            "inputSchema": {"type": "object", "properties": {
+                "q": {"type": "string", "maxLength": 256},
+                "status": {"type": "string", "enum": [status.value for status in TaskStatus]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+                "cursor": {"type": "string", "maxLength": 1024},
+            }},
+        },
+        {
+            "name": "max_events_query",
+            "description": "Read the latest journal page in chronological order; cursor fetches older entries.",
+            "inputSchema": {"type": "object", "properties": {
+                "task_id": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                "cursor": {"type": "string", "maxLength": 1024},
+            }, "required": ["task_id"]},
+        },
+        {
+            "name": "max_trace",
+            "description": "Read an owned task's evidence trace without executing work.",
+            "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}},
+                            "required": ["task_id"]},
+        },
         {
             "name": "max_create",
             "description": "Create a MAX task and return task_id immediately. Does not run or poll.",
@@ -240,8 +307,10 @@ def _tool_call(params: dict[str, Any]) -> dict[str, Any]:
         body = envelope(command=name or "tools/call", ok=False, error=f"unknown tool: {name}")
         return _tool_result(body, is_error=True)
     try:
+        if arguments.get("actor") is not None and arguments["actor"] != configured_principal():
+            raise PermissionError("actor must match configured principal")
         body = fn(arguments)
-    except (KeyError, ValueError, TypeError) as exc:
+    except (KeyError, ValueError, TypeError, PermissionError) as exc:
         body = envelope(command=name, ok=False, error=str(exc))
         return _tool_result(body, is_error=True)
     return _tool_result(body, is_error=not bool(body.get("ok", True)))
