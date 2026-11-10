@@ -5,6 +5,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { gitProvenance } from "../scripts/provenance.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const config = JSON.parse(await readFile(resolve(root, "wrangler.jsonc"), "utf8"));
@@ -36,6 +37,10 @@ test("workerd serves /console/ with security headers and hashed static assets", 
     assert.equal(response.headers.get("Cache-Control"), "no-cache");
     assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
     assert.equal(response.headers.get("Set-Cookie"), null);
+    const version = await mf.dispatchFetch(origin + "/console/version.json");
+    assert.equal(version.status, 200);
+    assert.match(version.headers.get("Cache-Control"), /no-store/);
+    assert.deepEqual(await version.json(), gitProvenance());
     const html = await response.text();
     const js = html.match(/src="([^\"]+\.js)"/)?.[1];
     const css = html.match(/href="([^\"]+\.css)"/)?.[1];

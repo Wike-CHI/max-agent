@@ -36,43 +36,85 @@ generated directory, Wrangler state, and local environment files are ignored by
 Git. `check` is a dry run, not a deployment. `test:runtime` exercises the actual
 workerd asset routing locally; it does not contact a real MAX backend.
 
-## Git automatic deployment
+## GitHub Actions deployment
 
-Follow the repository's Issue, feature-branch, draft-PR, CI and human-review
-process. Keep the repository visibility unchanged. Publishing a branch is not
-permission to merge it or expand a GitHub App's access.
+The authorized deployment route is `.github/workflows/cloudflare-console.yml`,
+not Cloudflare Workers Builds. It accepts pushes only to
+`feat/53-cloudflare-console` in `Wike-CHI/max-agent`. A manual run is also guarded
+to that exact branch. PR events, forks, tags and `master` cannot deploy. Keep the
+existing draft PR and repository visibility unchanged; this workflow does not
+merge, publish a release or update the Python backend.
 
-In the authorized Cloudflare account, create a **new** Worker with a Git
-connection to `Wike-CHI/max-agent`. Give the GitHub integration access to only this
-repository if a new grant is required, and obtain the applicable approval before
-granting persistent access. Do not copy account tokens into Git or this document.
+Every deployment first calls the complete `CI` workflow for the same commit:
+Python 3.12/3.13 tests, frontend tests/typecheck/build, Worker tests/workerd/dry
+run, package verification, lock audit, staging smoke and restore drill. Actions
+are pinned to full commit SHAs and have only `contents: read`. The deployment
+checkout is pinned to the event SHA and does not persist Git credentials.
 
-Use these Workers Builds settings:
+### One-time setup, before enabling deployment
 
-| Setting | Value |
-| --- | --- |
-| Worker name | `max-agent-console` |
-| Repository | `Wike-CHI/max-agent` |
-| Root directory | `cloudflare` |
-| Node version | `24` |
-| Build command | See below |
-| Deploy command | `npm run deploy` |
-| Non-production branch builds | Disabled initially |
-| Production branch | The exact reviewed/authorized branch containing this code |
+1. Confirm the selected Cloudflare account remains on **Workers Free**. Do not
+   enable paid products or overages. Confirm `max-agent-console` is the intended
+   dedicated Worker, not an unrelated existing Worker. A token scoped to one
+   Worker may require creating that Worker through the authorized dashboard
+   flow first.
+2. In GitHub repository Settings → Environments, create
+   **cloudflare-max-console**. Restrict deployment branches to the exact branch
+   `feat/53-cloudflare-console` (do not allow tags or all branches). Configure a
+   required reviewer so the first and later deployments are reviewed before
+   credentials are released. Do not claim these protections are active until
+   the repository settings have been checked.
+3. Through the approved secure flow, create a Cloudflare **account-owned API
+   token** granting **Editor for max-agent-console only**. Save it as the
+   environment secret **CLOUDFLARE_API_TOKEN**. Do not put it in a repository
+   secret, code, issue, command argument, build log, chat or frontend variable.
+   Single-Worker support for static-asset upload must be tested on the first
+   deployment. On 403, stop and report the denied operation; do not enlarge the
+   token's scope automatically.
+4. Add **CLOUDFLARE_ACCOUNT_ID** as a variable in that same GitHub environment.
+   It is read only by the deployment step and is not written into assets or Git.
+5. After verifying the protections, token, account and Free plan, set repository
+   Actions variable **CLOUDFLARE_DEPLOY_ENABLED** to exactly `true`. Until then,
+   pushes run verification and skip deployment. Missing credentials fail closed.
+   The switch must be repository-scoped because job conditions are evaluated
+   before environment variables are available.
 
-```sh
-npm ci && npm --prefix ../frontend ci && npm --prefix ../frontend test && npm test && npm run build && npm run test:runtime && npm run check
-```
+Only the Wrangler deploy step receives the token and account ID. Dependency
+installation, frontend builds, tests and live verification do not receive them.
+The workflow uses the checked-in Wrangler lock version and does not install a
+Cloudflare GitHub App or require broader account/zone access. There is no
+fallback credential, token-scope expansion, paid-plan upgrade or automatic
+redeployment after a failure.
 
-Cloudflare's automatic dependency detection is not a substitute for installing
-both package directories. The explicit build command works from `cloudflare/`.
-The Worker name must match `wrangler.jsonc`. Do not enable builds for arbitrary
-branches or pull requests carrying unreviewed code with deployment access.
+Once enabled, an authorized push to the selected branch runs all CI checks,
+waits for environment review, rebuilds and deploys the **console and proxy
+only**. Because this workflow initially exists only on the feature branch,
+GitHub may not expose `workflow_dispatch` until it also exists on the default
+branch. Do not merge just to obtain that button; use an authorized branch push
+or review/re-run its existing push run when appropriate. A run that failed after
+upload may already have changed the Worker: inspect its recorded version before
+retrying. Keep Cloudflare Workers Builds disconnected for this Worker to avoid
+competing deployers.
 
-Once connected, pushes to the selected production branch rebuild and deploy the
-**console and proxy only**. They do not update the separately hosted Python API.
-For first deployment, record the exact source commit, build result, deployed
-version and verified `workers.dev` URL. Never infer the account subdomain.
+### Commit and deployment evidence
+
+The build reads the actual checked-out Git commit and publishes only five
+provenance fields at `/console/version.json`: schema version, public repository,
+full Git SHA, ref and dirty status. It checks `GITHUB_SHA` against `git HEAD` and
+refuses deployment when the working tree or build is dirty/mismatched. No
+account identifier, environment dump, bearer token or deployment token is in
+that file. Local builds are labeled dirty when applicable and are not evidence
+of a deployment.
+
+Wrangler tags the Worker version with the short SHA and records the full SHA
+and Actions run ID in its version message. The post-deploy check reads Wrangler's
+machine output for the **actual version UUID and workers.dev URL**, then checks
+live provenance, the root redirect, static HTML/JS/CSS and the unauthenticated
+API boundary. It never guesses the account subdomain or sends an API bearer
+token. Read-only propagation checks retry briefly; the deploy command does not
+retry automatically. The Actions job summary records commit, Worker version,
+verified URL and backend status. A successful static deployment still does not
+prove authenticated task queries work.
 
 ## Backend connection and authentication
 
@@ -114,8 +156,9 @@ separately before sending private task data.
 
 At the documentation check on 2026-11-09, Workers Free includes 100,000 dynamic
 requests/day with 10 ms CPU per invocation; static asset requests are free and
-unlimited. Workers Builds Free includes 3,000 build minutes/month. Upstream wait
-time does not count as Worker CPU. These are plan limits, not an availability or
+unlimited. Standard GitHub-hosted runners are free for public repositories; this workflow
+uses `ubuntu-latest`, not paid larger runners. Upstream wait time does not count
+as Worker CPU. These are plan limits, not an availability or
 cost guarantee; stay on Free and do not enable paid overages or paid products.
 Asset-first routing avoids running the proxy for ordinary static files.
 
@@ -133,15 +176,18 @@ After deployment verify:
    deployed SHA matches that commit. Do not claim automatic updates are active
    from a configuration screen alone.
 
-Roll back to a known-good Worker version or disable the new Worker's Git trigger
-when appropriate. Database rollback is separate; this deployment makes no
+Set repository variable `CLOUDFLARE_DEPLOY_ENABLED` to `false` to stop future
+automatic deployments. With the required authorization, cancel any already
+queued/running deployment and roll back to a known-good Worker version when
+appropriate. Changing the switch does not undo an in-flight upload or remove
+the live Worker. Database rollback is separate; this deployment makes no
 schema change. Do not change unrelated Workers or their triggers.
 
 ## Official references
 
-- [Workers Builds setup](https://developers.cloudflare.com/workers/ci-cd/builds/)
-- [Build configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
-- [Build limits](https://developers.cloudflare.com/workers/ci-cd/builds/limits-and-pricing/)
+- [GitHub Actions for Workers](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)
+- [GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+- [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 - [Worker limits](https://developers.cloudflare.com/workers/platform/limits/)
 - [Static asset limits and billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/)
 - [Static asset routing](https://developers.cloudflare.com/workers/static-assets/binding/)

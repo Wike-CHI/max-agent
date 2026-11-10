@@ -3,9 +3,12 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SECURITY_HEADERS } from "../src/worker.mjs";
+import { gitProvenance } from "./provenance.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const destination = join(root, "cloudflare/public");
+// Read the checked-out commit, not a caller-provided version label.
+const provenance = gitProvenance(root);
 // Never let deploy/runtime credentials become part of Vite's build environment.
 const buildEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !/^(VITE_|MAX_|CLOUDFLARE_|CF_)/i.test(key),
@@ -21,6 +24,7 @@ if (!html.includes('/console/assets/')) throw new Error("Expected Vite base /con
 await rm(destination, { recursive: true, force: true });
 await mkdir(join(destination, "console"), { recursive: true });
 await cp(source, join(destination, "console"), { recursive: true });
+await writeFile(join(destination, "console/version.json"), JSON.stringify(provenance, null, 2) + "\n");
 // Static assets bypass the Worker and therefore need their own response headers.
 await writeFile(join(destination, "_headers"), [
   "/*",
@@ -28,6 +32,9 @@ await writeFile(join(destination, "_headers"), [
   "",
   "/console/",
   "  Cache-Control: no-cache",
+  "",
+  "/console/version.json",
+  "  Cache-Control: no-store, max-age=0",
   "",
   "/console/assets/*",
   "  Cache-Control: public, max-age=31536000, immutable",
