@@ -38,12 +38,18 @@ workerd asset routing locally; it does not contact a real MAX backend.
 
 ## GitHub Actions deployment
 
-The authorized deployment route is `.github/workflows/cloudflare-console.yml`,
-not Cloudflare Workers Builds. It accepts pushes only to
-`feat/53-cloudflare-console` in `Wike-CHI/max-agent`. A manual run is also guarded
-to that exact branch. PR events, forks, tags and `master` cannot deploy. Keep the
-existing draft PR and repository visibility unchanged; this workflow does not
-merge, publish a release or update the Python backend.
+The prepared deployment route is `.github/workflows/cloudflare-console.yml`,
+not Cloudflare Workers Builds. **This revision cannot deploy:** its only trigger
+is `workflow_dispatch`, and the deployment job has a literal `false` condition.
+Publishing it does not trigger this workflow. Even a manual run cannot deploy,
+regardless of repository variables or existing credentials. The normal PR CI
+workflow still runs and checks the code without deployment credentials.
+
+The eventual deployment scope remains `feat/53-cloudflare-console` in
+`Wike-CHI/max-agent`. Repository, branch and enable-variable guards are retained
+behind the hard stop. PR events, forks, tags and `master` must never deploy. Keep
+the existing draft PR and repository visibility unchanged; this workflow does
+not merge, publish a release or update the Python backend.
 
 Every deployment first calls the complete `CI` workflow for the same commit:
 Python 3.12/3.13 tests, frontend tests/typecheck/build, Worker tests/workerd/dry
@@ -73,11 +79,20 @@ checkout is pinned to the event SHA and does not persist Git credentials.
    token's scope automatically.
 4. Add **CLOUDFLARE_ACCOUNT_ID** as a variable in that same GitHub environment.
    It is read only by the deployment step and is not written into assets or Git.
-5. After verifying the protections, token, account and Free plan, set repository
-   Actions variable **CLOUDFLARE_DEPLOY_ENABLED** to exactly `true`. Until then,
-   pushes run verification and skip deployment. Missing credentials fail closed.
-   The switch must be repository-scoped because job conditions are evaluated
-   before environment variables are available.
+5. Verify the current repository Actions variable **CLOUDFLARE_DEPLOY_ENABLED**
+   and keep it unset or `false` during setup. Its value is not assumed known in
+   this revision: the literal-false job gate prevents deployment even if the
+   variable is already `true`. This switch must be repository-scoped because job
+   conditions are evaluated before environment variables are available.
+6. Only after the protections, token, account and Free plan have been verified
+   and activation is explicitly authorized, prepare a separate activation commit:
+   remove only the leading `false &&` from the deploy condition, add the `push`
+   trigger restricted to `feat/53-cloudflare-console`, and replace the
+   pre-activation test with tests for that exact enabled scope. Preserve all
+   remaining guards and the full CI dependency. Set the repository switch to
+   `true` only as part of that verified activation. Missing credentials still
+   fail closed. Publishing the activation commit may initiate deployment if the
+   switch is already enabled; do not treat that push as a harmless code update.
 
 Only the Wrangler deploy step receives the token and account ID. Dependency
 installation, frontend builds, tests and live verification do not receive them.
@@ -86,12 +101,15 @@ Cloudflare GitHub App or require broader account/zone access. There is no
 fallback credential, token-scope expansion, paid-plan upgrade or automatic
 redeployment after a failure.
 
-Once enabled, an authorized push to the selected branch runs all CI checks,
+After the separate activation commit and setup are complete, an authorized push
+to the selected branch runs all CI checks,
 waits for environment review, rebuilds and deploys the **console and proxy
 only**. Because this workflow initially exists only on the feature branch,
 GitHub may not expose `workflow_dispatch` until it also exists on the default
-branch. Do not merge just to obtain that button; use an authorized branch push
-or review/re-run its existing push run when appropriate. A run that failed after
+branch. Do not merge just to obtain that button. Before activation, there is no
+push deployment run to retry and manual runs cannot override the hard stop.
+After activation, use an authorized branch push or review/re-run its existing
+push run when appropriate. A run that failed after
 upload may already have changed the Worker: inspect its recorded version before
 retrying. Keep Cloudflare Workers Builds disconnected for this Worker to avoid
 competing deployers.

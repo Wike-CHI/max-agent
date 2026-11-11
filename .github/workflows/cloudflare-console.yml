@@ -1,9 +1,10 @@
 name: Deploy Cloudflare console
 
 on:
-  push:
-    branches: [feat/53-cloudflare-console]
   workflow_dispatch:
+
+# Pre-activation: no automatic trigger, and deploy is hard-disabled below.
+# Enabling requires a separately reviewed Git change after setup verification.
 
 # Never run deployment code from a pull request or grant repository writes.
 permissions:
@@ -21,9 +22,9 @@ jobs:
   deploy:
     name: deploy-cloudflare-console
     needs: verify
-    # Repository variable, deliberately absent/off until environment protection,
-    # the single-Worker token and account variable have all been configured.
-    if: github.repository == 'Wike-CHI/max-agent' && github.ref == 'refs/heads/feat/53-cloudflare-console' && vars.CLOUDFLARE_DEPLOY_ENABLED == 'true'
+    # Hard stop independent of current variables, credentials or manual inputs.
+    # Remove the literal false only in the separately authorized activation commit.
+    if: ${{ false && github.repository == 'Wike-CHI/max-agent' && github.ref == 'refs/heads/feat/53-cloudflare-console' && vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:

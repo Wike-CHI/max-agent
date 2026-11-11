@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertDeployable, DEPLOY_REF, gitProvenance, REPOSITORY } from "../scripts/provenance.mjs";
@@ -12,6 +12,16 @@ const manifest = { schema_version: 1, repository: REPOSITORY, git_sha: sha, git_
 const env = { GITHUB_ACTIONS: "true", GITHUB_EVENT_NAME: "push", GITHUB_SHA: sha, GITHUB_REF: DEPLOY_REF, GITHUB_REPOSITORY: REPOSITORY };
 const record = { type: "deploy", version: 1, worker_name: "max-agent-console", worker_name_overridden: false,
   version_id: "11111111-2222-4333-8444-555555555555", targets: ["https://max-agent-console.test-account.workers.dev"] };
+
+test("pre-activation workflow has no automatic trigger and a literal false deployment gate", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/cloudflare-console.yml", import.meta.url), "utf8");
+  assert.equal(workflow.match(/^on:\n((?:[ \t].*\n)+)/m)?.[1].trim(), "workflow_dispatch:");
+  const deploy = workflow.split(/^  deploy:\n/m)[1];
+  assert.ok(deploy, "Expected the protected deploy job.");
+  assert.match(deploy, /^    if: \$\{\{ false && github\.repository == 'Wike-CHI\/max-agent' && github\.ref == 'refs\/heads\/feat\/53-cloudflare-console' && vars\.CLOUDFLARE_DEPLOY_ENABLED == 'true' \}\}$/m);
+  assert.match(deploy, /^    needs: verify$/m);
+  assert.match(deploy, /^      name: cloudflare-max-console$/m);
+});
 
 test("build provenance reads real Git HEAD and detects modified or untracked source", async () => {
   const root = await mkdtemp(join(tmpdir(), "max-provenance-"));
