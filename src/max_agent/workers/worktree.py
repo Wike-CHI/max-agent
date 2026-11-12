@@ -6,6 +6,7 @@ The source repository is not registered as a worktree and is not edited.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import uuid
@@ -32,7 +33,12 @@ def create_isolated_worktree(*, task_id: str, workspace_root: Path, seed_source:
     run_root.mkdir(parents=True, exist_ok=False)
     home.mkdir()
     tmp.mkdir()
-    shutil.copytree(seed_source, seed, ignore=_ignore)
+    # Preserve relative symlinks. The default (follow) raises FileNotFoundError
+    # on dangling or host-absolute links, e.g. model-cache paths from a deploy host.
+    # Absolute/external links are then replaced with a placeholder file so a
+    # later CLI cannot resolve or follow the host target.
+    shutil.copytree(seed_source, seed, ignore=_ignore, symlinks=True)
+    _neutralize_external_symlinks(seed)
     env = child_env(home=home, tmp=tmp)
     _git(seed, env, ["init", "-b", "main"])
     _git(seed, env, ["add", "-A"])
@@ -45,10 +51,41 @@ def create_isolated_worktree(*, task_id: str, workspace_root: Path, seed_source:
     return work
 
 
+def _neutralize_external_symlinks(root: Path) -> None:
+    """Replace absolute or escaping symlinks with a text placeholder. Do not follow targets."""
+    root_res = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in list(dirnames) + list(filenames):
+            path = Path(dirpath) / name
+            if not path.is_symlink():
+                continue
+            target = os.readlink(path)
+            external = os.path.isabs(target)
+            if not external:
+                dest = path.parent / target
+                try:
+                    dest.resolve().relative_to(root_res)
+                except (ValueError, OSError):
+                    external = True
+            if not external:
+                continue
+            path.unlink()
+            path.write_text(
+                "# max-agent neutralized absolute/external symlink; target was not accessed\n"
+                f"target={target}\n",
+                encoding="utf-8",
+            )
+
+
 def _ignore(_directory: str, names: list[str]) -> set[str]:
     skipped: set[str] = set()
     for name in names:
-        if name in _SKIP_NAMES or name.startswith(".env") or name.endswith((".pem", ".key")):
+        if (
+            name in _SKIP_NAMES
+            or name.startswith(".env")
+            or name.endswith((".pem", ".key"))
+            or name == "nohup.out"
+        ):
             skipped.add(name)
     return skipped
 

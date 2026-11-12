@@ -27,6 +27,7 @@ from max_agent.models.schemas import TaskRead, WorkerResult
 from max_agent.workers.base import Worker, WorkerContext
 from max_agent.workers.cli_adapter import require_real_worker
 from max_agent.workers.registry import get_worker
+from max_agent.workers.sandbox import kill_live_process_groups, live_process_groups
 
 _IN_FLIGHT = frozenset({TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.VERIFYING})
 
@@ -92,16 +93,48 @@ def execute_claim(
             box["error"] = exc
 
     thread = threading.Thread(target=_target, name=f"max-agent-{claim.task_id[:8]}", daemon=True)
+    preexisting = live_process_groups()
     thread.start()
     thread.join(claim.timeout_seconds)
     if thread.is_alive():
-        # The thread cannot be killed. Fencing stops it from finalizing; a
-        # side-effecting worker may still be running in-process.
+        # The thread object cannot be killed. Terminate process groups it
+        # registered, then briefly join so run_bounded can return outputs.
+        owned = set(live_process_groups()) - set(preexisting)
+        leftover = kill_live_process_groups(owned)
+        thread.join(5.0)
+        result = box.get("result")
+        if isinstance(result, WorkerResult):
+            outputs = dict(result.outputs or {})
+            outputs["kernel_timeout"] = True
+            outputs["timed_out"] = True
+            if leftover:
+                outputs["orphaned_process_groups"] = leftover
+            if tool_calls and not result.tool_calls:
+                tool_calls_out = tool_calls
+            else:
+                tool_calls_out = result.tool_calls or tool_calls
+            return (
+                WorkerResult(
+                    ok=False,
+                    summary="worker timed out",
+                    outputs=outputs,
+                    tool_calls=tool_calls_out,
+                    recoverable=True,
+                    error=f"timeout after {claim.timeout_seconds}s",
+                    usage=result.usage,
+                ),
+                FailureClass.TIMEOUT,
+            )
         return (
             WorkerResult(
                 ok=False,
                 summary="worker timed out",
-                outputs={},
+                outputs={
+                    "adapter_failure": "timeout",
+                    "timed_out": True,
+                    "kernel_timeout": True,
+                    "orphaned_process_groups": leftover,
+                },
                 tool_calls=tool_calls,
                 recoverable=True,
                 error=f"timeout after {claim.timeout_seconds}s",

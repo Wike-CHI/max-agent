@@ -74,6 +74,179 @@ class BoundedRun:
     argv: list[str]
 
 
+_LIVE_PG_LOCK = threading.Lock()
+_LIVE_PROCESS_GROUPS: dict[int, Path | None] = {}
+
+
+def register_process_group(pgid: int, cwd: Path | None = None) -> None:
+    key = int(pgid)
+    resolved = None
+    if cwd is not None:
+        try:
+            resolved = Path(cwd).resolve()
+        except OSError:
+            resolved = Path(cwd)
+    with _LIVE_PG_LOCK:
+        previous = _LIVE_PROCESS_GROUPS.get(key)
+        _LIVE_PROCESS_GROUPS[key] = resolved or previous
+
+
+def unregister_process_group(pgid: int) -> None:
+    with _LIVE_PG_LOCK:
+        _LIVE_PROCESS_GROUPS.pop(int(pgid), None)
+
+
+def live_process_groups() -> frozenset[int]:
+    with _LIVE_PG_LOCK:
+        return frozenset(_LIVE_PROCESS_GROUPS)
+
+
+def live_process_roots(owned: set[int] | None = None) -> list[Path]:
+    with _LIVE_PG_LOCK:
+        items = _LIVE_PROCESS_GROUPS.items()
+        if owned is not None:
+            items = ((pgid, cwd) for pgid, cwd in items if pgid in owned)
+        return [cwd for _pgid, cwd in items if cwd is not None]
+
+
+def process_group_alive(pgid: int) -> bool:
+    try:
+        os.kill(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def kill_process_group(pgid: int, *, term_wait: float = 1.0, kill_wait: float = 2.0) -> bool:
+    """SIGTERM then SIGKILL a process group. True when the leader is gone."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        if not process_group_alive(pgid):
+            unregister_process_group(pgid)
+            return True
+    deadline = time.monotonic() + max(term_wait, 0.05)
+    while time.monotonic() < deadline:
+        if not process_group_alive(pgid):
+            unregister_process_group(pgid)
+            return True
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    deadline = time.monotonic() + max(kill_wait, 0.05)
+    while time.monotonic() < deadline:
+        if not process_group_alive(pgid):
+            unregister_process_group(pgid)
+            return True
+        time.sleep(0.05)
+    gone = not process_group_alive(pgid)
+    if gone:
+        unregister_process_group(pgid)
+    return gone
+
+
+def _ppid_map() -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    proc = Path("/proc")
+    if not proc.exists():
+        return mapping
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text()
+            close = raw.rfind(")")
+            ppid = int(raw[close + 2 :].split()[0])
+            mapping[int(entry.name)] = ppid
+        except (OSError, IndexError, ValueError):
+            continue
+    return mapping
+
+
+def descendant_pids(roots: set[int]) -> set[int]:
+    children: dict[int, list[int]] = {}
+    for pid, ppid in _ppid_map().items():
+        children.setdefault(ppid, []).append(pid)
+    found: set[int] = set()
+    stack = list(roots)
+    while stack:
+        current = stack.pop()
+        for child in children.get(current, ()):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
+    return found
+
+
+def pids_with_cwd_under(roots: Sequence[Path], *, exclude: set[int]) -> set[int]:
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            resolved.append(Path(root).resolve())
+        except OSError:
+            continue
+    if not resolved:
+        return set()
+    found: set[int] = set()
+    proc = Path("/proc")
+    if not proc.exists():
+        return found
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in exclude:
+            continue
+        try:
+            cwd = Path(os.readlink(entry / "cwd")).resolve()
+        except OSError:
+            continue
+        for root in resolved:
+            try:
+                cwd.relative_to(root)
+            except ValueError:
+                continue
+            found.add(pid)
+            break
+    return found
+
+
+def kill_pid(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def kill_live_process_groups(owned: set[int] | None = None) -> list[int]:
+    """Kill registered groups plus descendants and processes whose cwd is under a tracked root."""
+    targets = set(owned) if owned is not None else set(live_process_groups())
+    self_pid = os.getpid()
+    extra = descendant_pids(targets)
+    extra |= pids_with_cwd_under(live_process_roots(targets), exclude={self_pid})
+    leftover: list[int] = []
+    for pgid in targets:
+        if not kill_process_group(pgid):
+            leftover.append(pgid)
+    still: list[int] = []
+    for pid in extra:
+        if pid == self_pid or pid in targets:
+            continue
+        if process_group_alive(pid):
+            kill_pid(pid)
+        if process_group_alive(pid):
+            still.append(pid)
+    return leftover + still
+
+
 def path_is_allowed(path: Path, roots: Sequence[Path]) -> bool:
     """True when the resolved path is the root or a path inside it."""
     resolved = path.resolve()
@@ -176,6 +349,7 @@ def run_bounded(
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
+    register_process_group(proc.pid, cwd=cwd)
     stdout_parts: list[bytes] = []
     stderr_parts: list[bytes] = []
     stdout_count = [0]
@@ -200,8 +374,12 @@ def run_bounded(
             _terminate(proc)
             break
         time.sleep(0.05)
-    if proc.poll() is None:
-        _terminate(proc)
+    try:
+        if proc.poll() is None:
+            _terminate(proc)
+    finally:
+        if proc.poll() is not None:
+            unregister_process_group(proc.pid)
     for thread in threads:
         thread.join(timeout=2)
 
@@ -249,21 +427,10 @@ def _drain(pipe, parts: list[bytes], counter: list[int]) -> None:
 
 def _terminate(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
+        unregister_process_group(proc.pid)
         return
+    kill_process_group(proc.pid)
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
-    try:
-        proc.wait(timeout=1)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        return
-    try:
-        proc.wait(timeout=1)
+        proc.wait(timeout=0.2)
     except subprocess.TimeoutExpired:
         return

@@ -8,6 +8,14 @@ from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
 from max_agent.models.enums import TaskStatus, WorkerKind
 from max_agent.models.schemas import TaskCreate
+from max_agent.workers.sandbox import path_is_allowed
+
+# Merge note (PR54 x e2e): PR54 already made these regressions hermetic by
+# monkeypatching `_LOCAL_ROOTS` to a single tmp_path directory, so the e2e
+# variant (which hardcoded /var/tmp fixtures) is not applied here. The e2e
+# regression intent is kept explicitly instead: the rejected fixtures must sit
+# outside the *effective* allowlist, so they can never be judged "allowed"
+# just because a regression runner happens to place HOME under /tmp.
 
 
 def test_local_code_write_and_pytest(session, tmp_path: Path):
@@ -46,6 +54,8 @@ def test_local_code_rejects_existing_test_outside_allowlist(session, tmp_path: P
     marker = tmp_path / "max_agent_forbidden_marker"
     if marker.exists():
         marker.unlink()
+    # The fixture must be outside the effective allowlist, whatever HOME is.
+    assert not path_is_allowed(forbidden.resolve(), (allowed,))
     forbidden.write_text(
         "from pathlib import Path\n\n"
         "def test_should_not_run():\n"
@@ -90,6 +100,9 @@ def test_local_code_rejects_symlink_that_resolves_outside_allowlist(session, tmp
         encoding="utf-8",
     )
     link.symlink_to(secret)
+    # The symlink lives inside the allowlist but resolves outside it.
+    assert path_is_allowed(link.parent, (allowed,))
+    assert not path_is_allowed(link.resolve(), (allowed,))
     try:
         svc = TaskService(session)
         task = svc.create(

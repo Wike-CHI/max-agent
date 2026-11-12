@@ -20,6 +20,7 @@ from max_agent.kernel.service import TaskService
 from max_agent.models.enums import EventType, TaskStatus, WorkerKind
 from max_agent.models.schemas import ScheduleRequest, TaskCreate
 from max_agent.workers.cli_adapter import (
+    cli_workspace_roots,
     ADAPTER_VERSION,
     FORBIDDEN_CLI_FLAGS,
     REQUIRE_REAL_ENV,
@@ -27,6 +28,7 @@ from max_agent.workers.cli_adapter import (
     _passthrough,
     build_exec_argv,
     choose_vendor,
+    claude_spawn_auth_preflight,
     resolve_cli_identity,
 )
 from max_agent.workers.sandbox import ALLOWED_PASSTHROUGH, child_env, redact, run_bounded
@@ -220,6 +222,30 @@ def test_require_real_worker_payload_flag_rejects_stub(session, tmp_path: Path) 
     assert outputs["adapter_failure"] == "real_worker_required"
     assert outputs["require_real_worker"] is True
     assert outputs["real_cli_invoked"] is False
+
+
+def test_require_real_worker_still_rejects_stub_when_calc_fixture_absent(
+    session, tmp_path: Path
+) -> None:
+    seed = tmp_path / "empty-seed"
+    seed.mkdir()
+    (seed / "README.md").write_text("no calc fixture\n", encoding="utf-8")
+    _created, out = _run(
+        session,
+        "stub no-op must not satisfy require_real_worker",
+        {
+            "vendor": "stub",
+            "workspace_root": str(tmp_path / "ws"),
+            "repo_path": str(seed),
+            "require_real_worker": True,
+        },
+        criteria=["worker_ok"],
+    )
+    assert out.status == TaskStatus.FAILED
+    outputs = _outputs(session, out.id)
+    assert outputs["adapter_failure"] == "real_worker_required"
+    assert outputs["real_cli_invoked"] is False
+    assert outputs["require_real_worker"] is True
 
 
 def test_fixture_issue_passes_with_stub_and_archives_artifacts(session, tmp_path: Path, monkeypatch) -> None:
@@ -456,6 +482,149 @@ raise SystemExit(0)
     assert FORBIDDEN_CLI_FLAGS.isdisjoint(outputs["argv"])
 
 
+def test_claude_preflight_helper_presence_only_never_returns_values() -> None:
+    secret = "mm-preflight-secret-SHOULD-NOT-APPEAR-123456"
+    missing = claude_spawn_auth_preflight({})
+    assert missing.ok is False
+    assert missing.has_api_key is False
+    assert missing.has_auth_token is False
+    assert "cli_auth_missing" not in missing.reason or True
+    assert "ANTHROPIC_AUTH_TOKEN" in missing.reason
+    assert secret not in missing.reason
+    assert secret not in missing.__dict__.values()
+
+    minimax_only = claude_spawn_auth_preflight({"MINIMAX_API_KEY": secret})
+    assert minimax_only.ok is False
+    assert minimax_only.minimax_key_present_but_not_forwarded is True
+    assert secret not in minimax_only.reason
+    assert "MINIMAX_API_KEY" in minimax_only.reason
+
+    token_only = claude_spawn_auth_preflight(
+        {"ANTHROPIC_AUTH_TOKEN": secret, "ANTHROPIC_BASE_URL": "https://example.invalid/anthropic"}
+    )
+    assert token_only.ok is True
+    assert token_only.has_auth_token is True
+    assert token_only.has_api_key is False
+    assert token_only.has_base_url is True
+    assert token_only.reason == "ok"
+    assert secret not in token_only.reason
+
+    key_only = claude_spawn_auth_preflight({"ANTHROPIC_API_KEY": secret})
+    assert key_only.ok is True
+    assert key_only.has_api_key is True
+
+    blank = claude_spawn_auth_preflight({"ANTHROPIC_AUTH_TOKEN": "   ", "ANTHROPIC_API_KEY": ""})
+    assert blank.ok is False
+
+
+def test_missing_claude_auth_blocks_spawn_before_real_cli(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = bin_dir / "SPAWNED"
+    log = bin_dir / "claude.log"
+    script = bin_dir / "claude"
+    script.write_text(
+        f"""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+log = Path({str(log)!r})
+rows = json.loads(log.read_text()) if log.exists() else []
+rows.append(sys.argv[1:])
+log.write_text(json.dumps(rows))
+if sys.argv[1:2] == ["--version"]:
+    print("fake-claude 0")
+    raise SystemExit(0)
+Path({str(marker)!r}).write_text("spawned")
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    secret = "mm-preflight-secret-SHOULD-NOT-APPEAR-123456"
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv(REQUIRE_REAL_ENV, "1")
+    monkeypatch.setenv("MINIMAX_API_KEY", secret)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    _created, out = _run(
+        session,
+        "must not start claude without forwarded auth",
+        {"vendor": "claude", "workspace_root": str(tmp_path / "ws"), "require_real_worker": True},
+        criteria=["worker_ok", "output_equals:real_cli_invoked=true"],
+    )
+    assert out.status == TaskStatus.FAILED
+    assert not marker.exists()
+    outputs = _outputs(session, out.id)
+    assert outputs["adapter_failure"] == "cli_auth_missing"
+    assert outputs["real_cli_invoked"] is False
+    assert outputs["cli_invoked"] is False or outputs.get("cli_invoked") is False
+    # version probe may run; the -p spawn must not
+    if log.exists():
+        rows = json.loads(log.read_text(encoding="utf-8"))
+        assert all(row[:1] == ["--version"] for row in rows)
+        assert not any("-p" in row for row in rows)
+    dumped = json.dumps(outputs) + (out.last_error or "")
+    assert secret not in dumped
+    assert "ANTHROPIC_AUTH_TOKEN" in (out.last_error or outputs.get("adapter_failure") or "")
+    # last_error should carry the readable reason
+    assert "启动真实 Claude CLI 之前拦截" in (out.last_error or "")
+    assert "/login" in (out.last_error or "")
+
+
+def test_claude_auth_token_preflight_allows_fake_spawn(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = bin_dir / "claude.log"
+    script = bin_dir / "claude"
+    script.write_text(
+        f"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+log = Path({str(log)!r})
+rows = json.loads(log.read_text()) if log.exists() else []
+rows.append({{
+    "argv": sys.argv[1:],
+    "has_token": "ANTHROPIC_AUTH_TOKEN" in os.environ,
+    "has_minimax": "MINIMAX_API_KEY" in os.environ,
+}})
+log.write_text(json.dumps(rows))
+if sys.argv[1:2] == ["--version"]:
+    print("fake-claude 0")
+    raise SystemExit(0)
+Path.cwd().joinpath("calc.py").write_text("def add(a: int, b: int) -> int:\\n    return a + b\\n")
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    secret = "mm-preflight-token-SHOULD-NOT-LEAK-987654"
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", secret)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid/anthropic")
+    _created, out = _run(
+        session,
+        "Implement add() with forwarded auth token",
+        {"vendor": "claude", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    rows = json.loads(log.read_text(encoding="utf-8"))
+    assert len(rows) == 2
+    assert rows[1]["has_token"] is True
+    assert rows[1]["has_minimax"] is False
+    outputs = _outputs(session, out.id)
+    assert outputs["real_cli_invoked"] is True
+    assert secret not in json.dumps(outputs)
+    assert secret not in (out.last_error or "")
+
+
 def test_shell_metacharacters_in_the_goal_stay_data(session, tmp_path: Path) -> None:
     marker = tmp_path / "pwned"
     goal = f"$(touch {marker}); rm -rf /"
@@ -551,7 +720,11 @@ def test_output_is_capped(session, tmp_path: Path) -> None:
 
 
 def test_workspace_outside_allowlist_is_refused(session, tmp_path: Path) -> None:
-    outside = Path.home() / "max-agent-cli-outside"
+    from max_agent.workers.sandbox import path_is_allowed
+
+    # Do not use Path.home(): a regression runner may place HOME under /tmp.
+    outside = Path("/var/tmp/max-agent-cli-outside")
+    assert not path_is_allowed(outside, cli_workspace_roots())
     _created, out = _run(
         session,
         "escape",
@@ -599,6 +772,34 @@ def test_source_repo_is_copied_not_edited(session, tmp_path: Path) -> None:
     workspace = Path(_outputs(session, out.id)["workspace"])
     assert not (workspace / ".env").exists()
     assert "supersecretvalue" not in json.dumps(_outputs(session, out.id))
+
+
+def test_isolated_worktree_preserves_dangling_host_symlinks(tmp_path: Path) -> None:
+    """A seed with a dangling host-absolute symlink must still isolate."""
+    from max_agent.workers.worktree import create_isolated_worktree
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "README.md").write_text("ok\n", encoding="utf-8")
+    models = seed / "server" / "models" / "models" / "iic"
+    models.mkdir(parents=True)
+    target = Path("/www/wwwroot/wwwroot/missing-model-cache/speech_fsmn_vad")
+    link = models / "speech_fsmn_vad_zh-cn-16k-common-pytorch"
+    link.symlink_to(target)
+    assert link.is_symlink()
+    assert not link.exists()
+
+    work = create_isolated_worktree(
+        task_id="dangling-link",
+        workspace_root=tmp_path / "ws",
+        seed_source=seed,
+    )
+    copied = work / "server/models/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+    assert copied.exists()
+    assert not copied.is_symlink()
+    body = copied.read_text(encoding="utf-8")
+    assert str(target) in body and "max-agent neutralized" in body
+    assert (work / "README.md").read_text(encoding="utf-8") == "ok\n"
 
 
 def test_production_tag_still_blocks_before_the_worker(session, tmp_path: Path) -> None:
@@ -660,18 +861,28 @@ def test_claude_passthrough_includes_base_url_and_auth_token_when_set(
         assert key in ALLOWED_PASSTHROUGH
 
 
+def _clear_claude_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate the host env so omit/include tests do not inherit box credentials."""
+    from max_agent.workers.cli_adapter import _VENDOR_PASSTHROUGH
+
+    for key in _VENDOR_PASSTHROUGH["claude"]:
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_claude_passthrough_omits_unset_base_url_and_auth_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    _clear_claude_passthrough(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-testkey123456")
 
     values = _passthrough("claude")
     assert values == {"ANTHROPIC_API_KEY": "sk-ant-testkey123456"}
     assert "ANTHROPIC_BASE_URL" not in values
     assert "ANTHROPIC_AUTH_TOKEN" not in values
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in values
+    assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in values
+    assert "ANTHROPIC_DEFAULT_OPUS_MODEL" not in values
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in values
 
     home = tmp_path / "home"
     tmp = tmp_path / "tmp"
@@ -681,6 +892,35 @@ def test_claude_passthrough_omits_unset_base_url_and_auth_token(
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-testkey123456"
     assert "ANTHROPIC_BASE_URL" not in env
     assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in env
+
+
+def test_claude_passthrough_keeps_default_models_when_base_url_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Production contract: allowlisted DEFAULT_* stay in passthrough when set.
+
+    This is not a test-isolation flake. Unset BASE_URL/AUTH_TOKEN must be
+    omitted, but set model-routing vars must still be forwarded.
+    """
+    _clear_claude_passthrough(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-testkey123456")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "MiniMax-M2")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "MiniMax-M2")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "MiniMax-M2")
+
+    values = _passthrough("claude")
+    assert values["ANTHROPIC_API_KEY"] == "sk-ant-testkey123456"
+    assert values["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "MiniMax-M2"
+    assert values["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"] == "MiniMax-M2"
+    assert values["CLAUDE_CODE_SUBAGENT_MODEL"] == "MiniMax-M2"
+    assert "ANTHROPIC_BASE_URL" not in values
+    assert "ANTHROPIC_AUTH_TOKEN" not in values
+    assert "ANTHROPIC_MODEL" not in values
+
+    env = child_env(home=tmp_path / "home", tmp=tmp_path / "tmp", passthrough=values)
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "MiniMax-M2"
+    assert "ANTHROPIC_BASE_URL" not in env
 
 
 def test_codex_passthrough_includes_openai_base_url_when_set(

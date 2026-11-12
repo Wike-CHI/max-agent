@@ -49,9 +49,11 @@ def os_keys() -> list[str]:
 
 def _apply_fixture(workspace: Path) -> None:
     calc = workspace / "calc.py"
-    text = calc.read_text(encoding="utf-8") if calc.is_file() else ""
+    if not calc.is_file():
+        return
+    text = calc.read_text(encoding="utf-8")
     if "def add" not in text or "NotImplementedError" not in text:
-        raise SystemExit(3)
+        return
     calc.write_text(
         "def add(a: int, b: int) -> int:\n    return a + b\n",
         encoding="utf-8",
