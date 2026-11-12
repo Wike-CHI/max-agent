@@ -1191,8 +1191,10 @@ def test_claude_host_model_is_visible_on_attempt_trace_and_aer(
 ) -> None:
     bin_dir = tmp_path / "bin"
     _install_fake_cli(bin_dir, "claude", "{}")
+    fake_token = "sk-ant-FAKE-fixture-NOT-A-REAL-KEY-host-model-0001"
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", fake_token)
     monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "claude-haiku-fixture")
     created, out = _run(
         session,
@@ -1205,6 +1207,8 @@ def test_claude_host_model_is_visible_on_attempt_trace_and_aer(
     outputs = _outputs(session, out.id)
     assert outputs["vendor"] == "claude"
     assert outputs["real_cli_invoked"] is True
+    assert Path(outputs["argv"][0]).resolve() == (bin_dir / "claude").resolve()
+    assert fake_token not in json.dumps(outputs)
     assert outputs["model"] == "claude-haiku-fixture"
     assert outputs["provider"] == "anthropic"
     assert "usage" not in outputs
@@ -1245,8 +1249,10 @@ def test_cli_json_model_and_usage_marker_are_stored_on_the_attempt(
     }
     bin_dir = tmp_path / "bin"
     _install_fake_cli(bin_dir, "claude", json.dumps(payload))
+    fake_token = "sk-ant-FAKE-fixture-NOT-A-REAL-KEY-usage-marker-0002"
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", fake_token)
     monkeypatch.setenv("ANTHROPIC_MODEL", "from-host")
     created, out = _run(
         session,
@@ -1258,6 +1264,8 @@ def test_cli_json_model_and_usage_marker_are_stored_on_the_attempt(
     trace = _trace_cli(created.id)
     outputs = _outputs(session, out.id)
     assert outputs["vendor"] == "claude"
+    assert Path(outputs["argv"][0]).resolve() == (bin_dir / "claude").resolve()
+    assert fake_token not in json.dumps(outputs)
     assert outputs["model"] == "claude-from-json"
     assert outputs["provider"] == "anthropic"
     assert outputs["usage"]["marker"] == "measured"
