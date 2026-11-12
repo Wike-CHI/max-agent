@@ -10,7 +10,7 @@
 4. Open a **draft PR** against `master` early, using the PR template and `Refs #N` while working. Change to `Closes #N` when this PR fully resolves the Issue.
 5. Run CI (unit tests, package build, issue-link check) and attach validation evidence. Fix failures before review.
 6. After human review and passing checks, merge by squash (recommended), preserving the Issue link. **Do not auto-merge or push directly to master.**
-7. On a deliberate signed/reviewed version tag `vX.Y.Z`, the release workflow tests, packages, and creates a GitHub Release. No production deployment happens automatically.
+7. On a deliberate signed/reviewed version tag `vX.Y.Z`, the release workflow tests, packages, and creates a GitHub Release. This release workflow never deploys production. The prepared Cloudflare console workflow is hard-disabled pending separate activation; its eventual deployment requires the specified branch, CI and protected-environment approval. See [the deployment guide](docs/cloudflare.md).
 8. Write release notes and, if changing DB schema or execution semantics, a rollback / migration note.
 
 ## Local commands

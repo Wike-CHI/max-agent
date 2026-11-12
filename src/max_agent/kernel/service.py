@@ -15,6 +15,7 @@ from max_agent.kernel.errors import LeaseHeldError
 from max_agent.kernel.journal import Journal
 from max_agent.kernel.mutate import cas_update, transition_task
 from max_agent.kernel.readmodel import task_to_read
+from max_agent.kernel.query import latest_verification
 from max_agent.kernel.state_machine import TERMINAL
 from max_agent.models.aer import (
     EconomicsReport,
@@ -61,8 +62,12 @@ class TaskService:
     def trace(self, task_id: str) -> TaskTrace:
         return build_trace(self.session, self._get_row(task_id))
 
-    def metrics(self) -> EconomicsReport:
-        return compute_metrics(self.session)
+    def latest_verification(self, task_id: str) -> dict | None:
+        self._get_row(task_id)
+        return latest_verification(self.session, task_id)
+
+    def metrics(self, *, created_by: str | None = None) -> EconomicsReport:
+        return compute_metrics(self.session, created_by=created_by)
 
     def retry_aer_exports(self) -> ExportRetryResult:
         return self.journal.retry_exports()

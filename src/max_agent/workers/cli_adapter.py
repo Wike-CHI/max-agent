@@ -9,6 +9,9 @@ and worker_payload:
 - cancel_file: touched by the caller to SIGTERM the child
 - subprocess_timeout_seconds, max_output_bytes
 - stub_sleep_seconds, stub_exit_code, stub_stdout_bytes, stub_canary
+- acceptance.kind: document | code; document files are checked for existence,
+  non-empty size, required headings and completeness. Code tasks run
+  payload pytest_targets, or test_calc.py only when that file exists.
 - require_real_worker: refuse stub fallback unless a real CLI is invoked
 
 Outputs (also archived as `.max-agent/manifest.json`) include adapter_version,
@@ -29,6 +32,11 @@ choose a model tier or escalate.
 Setting `require_real_worker` in worker_payload or
 `MAX_AGENT_REQUIRE_REAL_WORKER=1` makes stub selection and any result without
 `real_cli_invoked=true` fail with `real_worker_required`.
+A real Claude spawn is blocked before `run_bounded` with `cli_auth_missing`
+unless the worker process environment already has `ANTHROPIC_API_KEY` or
+`ANTHROPIC_AUTH_TOKEN`. Passthrough reads only that process env; it does not
+load `~/.claude/settings.json`. Isolated child HOME is the worktree `.home`.
+`MINIMAX_API_KEY` is not allowlisted and is not forwarded.
 
 Grok is invoked as headless `-p` with `--sandbox strict` (no `--yolo`).
 Codex is invoked as `exec --sandbox workspace-write` (no `danger-full-access`).
@@ -44,7 +52,7 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Sequence,  Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -59,6 +67,13 @@ from max_agent.workers.sandbox import (
     redact,
     run_bounded,
     secret_values,
+)
+from max_agent.workers.document_acceptance import (
+    acceptance_kind,
+    document_specs,
+    evaluate_document_acceptance,
+    missing_pytest_targets,
+    pytest_targets,
 )
 from max_agent.workers.worktree import WorktreeError, create_isolated_worktree
 
@@ -79,13 +94,29 @@ FORBIDDEN_CLI_FLAGS = frozenset(
     }
 )
 
+_DOCUMENT_FAILURES = frozenset(
+    {
+        "document_missing",
+        "document_empty",
+        "document_too_short",
+        "document_too_long",
+        "document_heading_missing",
+        "document_incomplete",
+        "document_path_invalid",
+        "document_failed",
+        "verification_unspecified",
+        "pytest_target_missing",
+    }
+)
 _NON_RECOVERABLE = frozenset(
     {
         "cli_not_authorized",
+        "cli_auth_missing",
         "cli_unavailable",
         "path_violation",
         "real_worker_required",
         "worktree_failed",
+        *_DOCUMENT_FAILURES,
     }
 )
 _VENDOR_ORDER = ("grok", "codex", "claude")
@@ -185,6 +216,18 @@ def choose_vendor(requested: str, probes: list[Probe], authorized: bool) -> tupl
     return requested, None
 
 
+
+def _string_list(value: Any) -> list[str] | None:
+    if not value:
+        return None
+    if isinstance(value, str):
+        items = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        items = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        return None
+    return items or None
+
 def build_exec_argv(
     vendor: str,
     *,
@@ -192,6 +235,8 @@ def build_exec_argv(
     workspace: Path,
     prompt: str,
     prompt_file: Path,
+    tools: Sequence[str] | None = None,
+    disallowed_tools: Sequence[str] | None = None,
 ) -> list[str]:
     """Argv for one headless coding CLI. The prompt is a single argument."""
     del prompt_file  # real CLIs receive the prompt as one argv element
@@ -239,9 +284,12 @@ def build_exec_argv(
             "acceptEdits",
             "--output-format",
             "json",
-            "-p",
-            prompt,
         ]
+        if tools:
+            argv.extend(["--tools", ",".join(tools)])
+        if disallowed_tools:
+            argv.extend(["--disallowedTools", ",".join(disallowed_tools)])
+        argv.extend(["-p", prompt])
     else:
         raise ValueError(f"no real CLI argv for vendor {vendor}")
     blocked = FORBIDDEN_CLI_FLAGS.intersection(argv)
@@ -281,8 +329,31 @@ class CliWorker(Worker):
         note("cli.probe", {"vendor": vendor, "authorized": authorized, "failure": failure or ""})
         if failure is None and required and vendor == "stub":
             failure = "real_worker_required"
+        preflight_error = None
+        if failure is None and vendor == "claude":
+            preflight = claude_spawn_auth_preflight()
+            note(
+                "cli.auth_preflight",
+                {
+                    "ok": "true" if preflight.ok else "false",
+                    "has_api_key": "true" if preflight.has_api_key else "false",
+                    "has_auth_token": "true" if preflight.has_auth_token else "false",
+                    "has_base_url": "true" if preflight.has_base_url else "false",
+                    "minimax_key_present_but_not_forwarded": (
+                        "true" if preflight.minimax_key_present_but_not_forwarded else "false"
+                    ),
+                },
+            )
+            if not preflight.ok:
+                failure = "cli_auth_missing"
+                preflight_error = preflight.reason
         if failure:
-            summary = "stub refused because a real CLI worker is required" if failure == "real_worker_required" else failure
+            if failure == "real_worker_required":
+                summary = "stub refused because a real CLI worker is required"
+            elif preflight_error:
+                summary = preflight_error
+            else:
+                summary = failure
             return self._finish(
                 ok=False,
                 summary=summary,
@@ -357,6 +428,10 @@ class CliWorker(Worker):
                 workspace=workspace,
                 prompt=redact(prompt, secrets),
                 prompt_file=prompt_file,
+                tools=_string_list(payload.get("claude_tools") or payload.get("tools")),
+                disallowed_tools=_string_list(
+                    payload.get("claude_disallowed_tools") or payload.get("disallowed_tools")
+                ),
             )
             passthrough = _passthrough(vendor)
             real = True
@@ -383,25 +458,73 @@ class CliWorker(Worker):
         pytest_exit: int | None = None
         pytest_stdout = ""
         pytest_truncated = False
+        document_report: dict[str, Any] | None = None
+        verification: dict[str, Any] | None = None
         if failure is None:
-            pytest_ran = run_bounded(
-                [sys.executable, "-m", "pytest", "-q", "--noconftest", "--rootdir", str(workspace), "test_calc.py"],
-                cwd=workspace,
-                env=child_env(home=home, tmp=tmp),
-                timeout_seconds=max(min(ctx.timeout_seconds, 120), 1),
-                max_output_bytes=limit,
-                secrets=secrets,
-            )
-            note("cli.pytest", {"exit_code": pytest_ran.exit_code if pytest_ran.exit_code is not None else ""})
-            pytest_exit = pytest_ran.exit_code
-            pytest_stdout = pytest_ran.stdout
-            pytest_truncated = pytest_ran.truncated
-            if pytest_ran.timed_out:
-                failure = "timeout"
-            elif pytest_ran.cancelled:
-                failure = "cancelled"
-            elif pytest_ran.exit_code != 0:
-                failure = "pytest_failed"
+            kind = acceptance_kind(payload)
+            if kind is None:
+                kind = "document" if document_specs(payload) else "code"
+            if kind == "unverified":
+                verification = {"kind": "unverified", "status": "unverified", "explicit": True}
+                note("cli.verification", {"status": "unverified", "explicit": "true"})
+                failure = "verification_unspecified"
+            elif kind == "document":
+                specs = document_specs(payload)
+                if not specs:
+                    verification = {"kind": "document", "status": "unspecified"}
+                    failure = "verification_unspecified"
+                else:
+                    check = evaluate_document_acceptance(workspace, specs)
+                    document_report = check.as_dict()
+                    verification = {
+                        "kind": "document",
+                        "status": "passed" if check.ok else "failed",
+                        "failure": check.failure,
+                    }
+                    note("cli.document_acceptance", {"ok": str(check.ok), "failure": check.failure or ""})
+                    if not check.ok:
+                        failure = check.failure or "document_failed"
+            else:
+                targets = pytest_targets(workspace, payload)
+                if not targets:
+                    verification = {"kind": "code", "status": "unspecified", "targets": []}
+                    note("cli.verification", {"status": "unspecified"})
+                    failure = "verification_unspecified"
+                else:
+                    missing = missing_pytest_targets(workspace, targets)
+                    if missing:
+                        verification = {
+                            "kind": "code",
+                            "status": "failed",
+                            "targets": targets,
+                            "missing": missing,
+                        }
+                        note("cli.verification", {"status": "pytest_target_missing"})
+                        failure = "pytest_target_missing"
+                    else:
+                        pytest_ran = run_bounded(
+                            [sys.executable, "-m", "pytest", "-q", "--noconftest", "--rootdir", str(workspace), *targets],
+                            cwd=workspace,
+                            env=child_env(home=home, tmp=tmp),
+                            timeout_seconds=max(min(ctx.timeout_seconds, 120), 1),
+                            max_output_bytes=limit,
+                            secrets=secrets,
+                        )
+                        note("cli.pytest", {"exit_code": pytest_ran.exit_code if pytest_ran.exit_code is not None else ""})
+                        pytest_exit = pytest_ran.exit_code
+                        pytest_stdout = pytest_ran.stdout
+                        pytest_truncated = pytest_ran.truncated
+                        verification = {
+                            "kind": "code",
+                            "status": "passed" if pytest_ran.exit_code == 0 and not pytest_ran.timed_out else "failed",
+                            "targets": targets,
+                        }
+                        if pytest_ran.timed_out:
+                            failure = "timeout"
+                        elif pytest_ran.cancelled:
+                            failure = "cancelled"
+                        elif pytest_ran.exit_code != 0:
+                            failure = "pytest_failed"
 
         report = _base_report(
             vendor=vendor,
@@ -422,6 +545,10 @@ class CliWorker(Worker):
             pytest_exit_code=pytest_exit,
         )
         report["pytest_stdout"] = pytest_stdout
+        if document_report is not None:
+            report["document_acceptance"] = document_report
+        if verification is not None:
+            report["verification"] = verification
         manifest = _archive(workspace, report)
         report["artifact_manifest"] = str(manifest)
         report["artifacts"] = _inventory(workspace)
@@ -559,8 +686,15 @@ def _cli_timeout(ctx: WorkerContext, payload: dict[str, Any]) -> float:
     requested = payload.get("subprocess_timeout_seconds")
     budget = float(ctx.timeout_seconds)
     if requested is None:
-        return max(budget, 0.1)
-    return max(min(float(requested), budget), 0.1)
+        chosen = budget
+        apply_slack = True
+    else:
+        chosen = min(float(requested), budget)
+        apply_slack = float(requested) >= budget
+    if apply_slack:
+        slack = 30.0 if budget >= 60 else max(budget * 0.15, 0.2)
+        chosen = max(chosen - slack, 0.1)
+    return max(chosen, 0.1)
 
 
 def _stub_argv(workspace: Path, prompt_file: Path, payload: dict[str, Any]) -> list[str]:
@@ -590,6 +724,68 @@ def _passthrough(vendor: str) -> dict[str, str]:
         if raw:
             values[key] = raw
     return values
+
+
+@dataclass(frozen=True)
+class ClaudeAuthPreflight:
+    """Presence flags only. Never stores secret values."""
+
+    ok: bool
+    reason: str
+    has_api_key: bool
+    has_auth_token: bool
+    has_base_url: bool
+    minimax_key_present_but_not_forwarded: bool
+
+
+_CLAUDE_AUTH_MISSING_REASON = (
+    "已在启动真实 Claude CLI 之前拦截：当前工作进程环境中没有 "
+    "ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN。"
+    "CliWorker 只会把进程环境里已设置的 allowlist 键"
+    "（_passthrough / ALLOWED_PASSTHROUGH）传给隔离子进程；"
+    "子进程 HOME 是工作区 .home，不会读取宿主 ~/.claude/settings.json。"
+    "MINIMAX_API_KEY 不在透传允许列表中，即使已设置也不会传给 Claude。"
+    "请在内核/提交进程环境中注入 ANTHROPIC_AUTH_TOKEN 与 ANTHROPIC_BASE_URL"
+    "（以及需要的 ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*），"
+    "不要用 /login 替代现有 API provider，也不要改全局 provider。"
+)
+
+
+def _env_present(environ: Mapping[str, str] | Mapping, key: str) -> bool:
+    raw = environ.get(key)
+    return bool(isinstance(raw, str) and raw.strip())
+
+
+def claude_spawn_auth_preflight(environ: Mapping | None = None) -> ClaudeAuthPreflight:
+    """Fail closed when a real Claude child would have no forwarded auth."""
+    env = os.environ if environ is None else environ
+    has_api_key = _env_present(env, "ANTHROPIC_API_KEY")
+    has_auth_token = _env_present(env, "ANTHROPIC_AUTH_TOKEN")
+    has_base_url = _env_present(env, "ANTHROPIC_BASE_URL")
+    has_minimax = _env_present(env, "MINIMAX_API_KEY")
+    forwarded = has_api_key or has_auth_token
+    if forwarded:
+        return ClaudeAuthPreflight(
+            ok=True,
+            reason="ok",
+            has_api_key=has_api_key,
+            has_auth_token=has_auth_token,
+            has_base_url=has_base_url,
+            minimax_key_present_but_not_forwarded=has_minimax and not forwarded,
+        )
+    reason = _CLAUDE_AUTH_MISSING_REASON
+    if has_minimax:
+        reason += " 检测到 MINIMAX_API_KEY 已设置，但它不会被转发。"
+    if has_base_url:
+        reason += " ANTHROPIC_BASE_URL 已设置，但仍缺少 API key 或 auth token。"
+    return ClaudeAuthPreflight(
+        ok=False,
+        reason=reason,
+        has_api_key=has_api_key,
+        has_auth_token=has_auth_token,
+        has_base_url=has_base_url,
+        minimax_key_present_but_not_forwarded=has_minimax,
+    )
 
 
 def _classify_run(ran) -> str | None:

@@ -6,6 +6,45 @@ from pathlib import Path
 import pytest
 
 from max_agent.db.session import init_db, reset_engine, session_scope
+from max_agent.workers.cli_adapter import ALLOW_ENV, REQUIRE_REAL_ENV
+from max_agent.workers.sandbox import ALLOWED_PASSTHROUGH
+
+_HOST_CLI_NAMES = ("claude", "grok", "codex")
+_SECRET_SUFFIXES = ("_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_SECRET", "_PASSWORD")
+_SECRET_NAMES = frozenset(
+    {
+        "MINIMAX_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "XAI_API_KEY",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_cli_and_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep stub/fake tests from inheriting host credentials or real coding CLIs."""
+    monkeypatch.delenv(ALLOW_ENV, raising=False)
+    monkeypatch.delenv(REQUIRE_REAL_ENV, raising=False)
+    for key in list(os.environ):
+        if (
+            key in ALLOWED_PASSTHROUGH
+            or key in _SECRET_NAMES
+            or key.startswith(("ANTHROPIC_", "OPENAI_", "XAI_", "GROK_", "CLAUDE_"))
+            or key.endswith(_SECRET_SUFFIXES)
+        ):
+            monkeypatch.delenv(key, raising=False)
+    kept: list[str] = []
+    for part in os.environ.get("PATH", "").split(os.pathsep):
+        if not part:
+            continue
+        directory = Path(part)
+        if any((directory / name).exists() for name in _HOST_CLI_NAMES):
+            continue
+        kept.append(part)
+    monkeypatch.setenv("PATH", os.pathsep.join(kept) or "/usr/bin:/bin")
 
 
 @pytest.fixture(autouse=True)

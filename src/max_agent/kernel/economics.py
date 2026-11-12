@@ -386,8 +386,11 @@ def _source_average(groups: list[list[TaskAttemptRow]], source: str) -> MetricVa
     return _average(parts)
 
 
-def compute_metrics(session: Session) -> EconomicsReport:
-    tasks = session.query(TaskRow).all()
+def compute_metrics(session: Session, *, created_by: str | None = None) -> EconomicsReport:
+    query = session.query(TaskRow)
+    if created_by is not None:
+        query = query.filter(TaskRow.created_by == created_by)
+    tasks = query.all()
     eligible = [task for task in tasks if task.status != TaskStatus.CANCELLED.value]
     verified = [task for task in eligible if task.status == TaskStatus.SUCCEEDED.value]
     if not eligible:

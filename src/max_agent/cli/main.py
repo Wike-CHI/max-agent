@@ -75,7 +75,9 @@ def _emit_task(ctx: typer.Context, command: str, task: TaskRead, *, include_even
         _print(task)
         return
     events = _load_events(task.id) if include_events else None
-    _echo_json(envelope(command=command, task=task, events=events))
+    with session_scope() as session:
+        verification = TaskService(session).latest_verification(task.id)
+    _echo_json(envelope(command=command, task=task, events=events, verification=verification))
 
 
 @app.callback()
@@ -376,10 +378,11 @@ def events_cmd(
             service = TaskService(session)
             task = service.get(task_id)
             events = service.list_events(task_id, limit=limit)
+            verification = service.latest_verification(task_id)
     except KeyError as exc:
         _fail(ctx, "events", str(exc))
     if _json_mode(ctx):
-        _echo_json(envelope(command="events", task=task, events=events))
+        _echo_json(envelope(command="events", task=task, events=events, verification=verification))
         return
     _print(events)
 

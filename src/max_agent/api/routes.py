@@ -14,6 +14,7 @@ from max_agent.entry.contract import envelope
 from max_agent.entry.webhook import WebhookError, accept_inbound, verify_signature
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
+from max_agent.kernel.query import TaskQuery
 from max_agent.models.aer import EconomicsReport, ExportRetryResult, TaskTrace
 from max_agent.models.enums import TaskStatus
 from max_agent.models.schemas import (
@@ -25,6 +26,8 @@ from max_agent.models.schemas import (
     TaskEventRead,
     TaskGraphCreate,
     TaskRead,
+    TaskPage,
+    TaskEventPage,
 )
 
 router = APIRouter(prefix="/v1")
@@ -80,6 +83,38 @@ def list_tasks(
 ) -> list[TaskRead]:
     with session_scope() as session:
         return TaskService(session).list_tasks(status=status, limit=limit, created_by=principal)
+
+
+@router.get("/tasks/query", response_model=TaskPage)
+def query_tasks(
+    q: str = Query(default="", max_length=256),
+    status: TaskStatus | None = None,
+    limit: int = Query(default=25, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=1024),
+    principal: str = Depends(require_principal),
+) -> TaskPage:
+    try:
+        with session_scope() as session:
+            return TaskQuery(session, principal).tasks(q=q, status=status, limit=limit, cursor=cursor)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/tasks/{task_id}/events/query", response_model=TaskEventPage)
+def query_events(
+    task_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=1024),
+    principal: str = Depends(require_principal),
+) -> TaskEventPage:
+    try:
+        with session_scope() as session:
+            authorize_task(session, task_id, principal)
+            return TaskQuery(session, principal).events(task_id, limit=limit, cursor=cursor)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/tasks/{task_id}", response_model=TaskRead)
@@ -140,7 +175,8 @@ def task_status(task_id: str, principal: str = Depends(require_principal)) -> di
             authorize_task(session, task_id, principal)
             task = service.get(task_id)
             events = service.list_events(task_id)
-        return envelope(command="status", task=task, events=events)
+            verification = service.latest_verification(task_id)
+        return envelope(command="status", task=task, events=events, verification=verification)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -231,7 +267,7 @@ def task_trace(task_id: str, principal: str = Depends(require_principal)) -> Tas
 @router.get("/metrics", response_model=EconomicsReport)
 def metrics(principal: str = Depends(require_principal)) -> EconomicsReport:
     with session_scope() as session:
-        return TaskService(session).metrics()
+        return TaskService(session).metrics(created_by=principal)
 
 
 @router.post("/aer/retry", response_model=ExportRetryResult)

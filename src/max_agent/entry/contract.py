@@ -27,6 +27,7 @@ def envelope(
     ok: bool = True,
     error: str | None = None,
     deduplicated: bool = False,
+    verification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fixed key set so a machine caller can parse every command the same way."""
     approved = False
@@ -50,7 +51,7 @@ def envelope(
         "idempotent_hit": False if task is None else bool(task.idempotent_replay),
         "deduplicated": deduplicated,
         "idempotency_key": None if task is None else task.idempotency_key,
-        "verification": latest_verification(events),
+        "verification": verification if verification is not None else latest_verification(events),
         "error": error,
         "task": None if task is None else task.model_dump(mode="json"),
         "events": None if events is None else [item.model_dump(mode="json") for item in events],
