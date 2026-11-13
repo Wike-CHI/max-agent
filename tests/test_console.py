@@ -31,7 +31,7 @@ def test_static_console_and_assets_do_not_expose_parent_files(tmp_path: Path) ->
     assert client.get("/console/%2e%2e/private.txt").status_code == 404
 
 
-def test_console_security_headers_and_api_no_store(db_url: str) -> None:
+def test_console_security_headers_and_api_no_store(db_url: str, auth_header) -> None:
     client = TestClient(create_app())
     response = client.get("/console/")
     assert response.status_code in (200, 503)
@@ -39,6 +39,6 @@ def test_console_security_headers_and_api_no_store(db_url: str) -> None:
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "test-api-token" not in response.text
-    response = client.get("/v1/tasks", headers={"Authorization": "Bearer test-api-token"})
+    response = client.get("/v1/tasks", headers=auth_header("test-read"))
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"

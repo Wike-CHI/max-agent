@@ -141,6 +141,7 @@ class TokenRecord:
     token_id: str
     scopes: frozenset[str]
     enabled: bool
+    secret_sha256: str
 
 @dataclass(frozen=True)
 class AuthContext:
@@ -440,6 +441,7 @@ class TokenRecord:
     token_id: str
     scopes: frozenset[str]
     enabled: bool
+    secret_sha256: str
 
 
 @dataclass(frozen=True)
@@ -510,6 +512,7 @@ def _parse_records(payload: Any) -> dict[str, TokenRecord]:
             token_id=token_id,
             scopes=scope_set,
             enabled=enabled,
+            secret_sha256=secret_sha256,
         )
     return records
 

@@ -23,7 +23,7 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch):
     reset_engine()
     reset_telemetry()
     init_db(url)
-    with TestClient(create_app(), headers={"Authorization": "Bearer test-api-token"}) as test_client:
+    with TestClient(create_app()) as test_client:
         yield test_client
     reset_engine()
     reset_telemetry()
@@ -54,7 +54,9 @@ def test_ready_failure_hides_secret_text(client: TestClient, monkeypatch: pytest
     assert response.json()["detail"] == "database unavailable"
 
 
-def test_requests_record_spans_without_otel_sdk(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_requests_record_spans_without_otel_sdk(
+    client: TestClient, auth_header, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MAX_AGENT_OTEL", "1")
     reset_telemetry()
     response = client.get("/v1/health")
@@ -62,7 +64,7 @@ def test_requests_record_spans_without_otel_sdk(client: TestClient, monkeypatch:
     snapshot = get_telemetry().snapshot()
     assert snapshot["counters"]["http.server.requests"] >= 1
     assert any(span["name"] == "http.request" and span["status"] == "ok" for span in snapshot["spans"])
-    listed = client.get("/v1/telemetry")
+    listed = client.get("/v1/telemetry", headers=auth_header("test-read"))
     assert listed.status_code == 200
     assert "http.server.requests" in listed.json()["counters"]
 

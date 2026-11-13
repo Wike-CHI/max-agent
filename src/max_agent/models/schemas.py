@@ -230,6 +230,17 @@ class TaskPage(BaseModel):
     next_cursor: str | None = None
 
 
+class DispatchRequest(BaseModel):
+    """Body of POST /v1/tasks/{task_id}/dispatch.
+
+    The dispatch gate (version / content-hash checks) is enforced by a later
+    task; the fields exist so the endpoint has a stable request shape.
+    """
+
+    expected_version: int
+    content_hash: str
+
+
 class TaskEventPage(BaseModel):
     items: list[TaskEventRead]
     next_cursor: str | None = None

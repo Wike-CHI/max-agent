@@ -338,7 +338,7 @@ def test_export_failure_is_retryable_and_does_not_block_the_task(session, tmp_pa
     assert sorted(path.name for path in directory.glob("*.json")) == files
 
 
-def test_issue_tag_and_http_trace(db_url: str):
+def test_issue_tag_and_http_trace(db_url: str, auth_header):
     from max_agent.db.session import session_scope
 
     with session_scope(db_url) as session:
@@ -349,7 +349,8 @@ def test_issue_tag_and_http_trace(db_url: str):
                 acceptance_criteria=["worker_ok"],
                 tags=["issue:Wike-CHI/max-agent#6"],
                 worker_payload={"mode": "success"},
-            )
+            ),
+            created_by="tester",  # match autouse registry MAX_AGENT_API_ACTOR
         )
         assert svc.get(created.id).issue_ref == "Wike-CHI/max-agent#6"
         Scheduler(session).run_one(created.id)
@@ -359,7 +360,7 @@ def test_issue_tag_and_http_trace(db_url: str):
 
     from max_agent.api.app import create_app
 
-    client = TestClient(create_app(), headers={"Authorization": "Bearer test-api-token"})
+    client = TestClient(create_app(), headers=auth_header("test-read"))
     traced = client.get(f"/v1/tasks/{task_id}/trace")
     assert traced.status_code == 200
     body = traced.json()

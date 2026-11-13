@@ -16,13 +16,10 @@ from max_agent.kernel.service import TaskService
 from max_agent.mcp.server import handle_message
 from max_agent.models.schemas import TaskCreate
 
-AUTH = {"Authorization": "Bearer test-api-token"}
-
-
 @pytest.fixture()
-def client(db_url, monkeypatch):
+def client(db_url, monkeypatch, auth_header):
     monkeypatch.setenv('MAX_AGENT_API_ACTOR', 'alice')
-    with TestClient(create_app(), headers=AUTH) as client:
+    with TestClient(create_app(), headers=auth_header("test-read")) as client:
         yield client
 
 

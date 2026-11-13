@@ -8,18 +8,19 @@ from max_agent.api.app import create_app
 from max_agent.db.session import init_db, reset_engine
 
 
-def test_api_create_run_events(tmp_path):
+def test_api_create_run_events(tmp_path, auth_header):
     url = f"sqlite:///{tmp_path / 'api.db'}"
     os.environ["MAX_AGENT_DATABASE_URL"] = url
     reset_engine()
     init_db(url)
-    client = TestClient(create_app(), headers={"Authorization": "Bearer test-api-token"})
+    client = TestClient(create_app())
 
     r = client.get("/v1/health")
     assert r.status_code == 200
 
     r = client.post(
         "/v1/tasks",
+        headers=auth_header("test-create"),
         json={
             "goal": "api demo",
             "acceptance_criteria": ["worker_ok"],
@@ -32,11 +33,11 @@ def test_api_create_run_events(tmp_path):
     task = r.json()
     tid = task["id"]
 
-    r = client.post(f"/v1/tasks/{tid}/schedule", json={})
+    r = client.post(f"/v1/tasks/{tid}/schedule", headers=auth_header("test-execute-inline"), json={})
     assert r.status_code == 200
     assert r.json()["status"] == "succeeded"
 
-    r = client.get(f"/v1/tasks/{tid}/events")
+    r = client.get(f"/v1/tasks/{tid}/events", headers=auth_header("test-read"))
     assert r.status_code == 200
     assert len(r.json()) >= 3
 

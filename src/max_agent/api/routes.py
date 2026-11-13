@@ -10,7 +10,16 @@ from max_agent.api.auth import (
     authorize_task,
     require_actor_match,
     require_any_token,
-    require_principal,
+    require_scope,
+)
+from max_agent.api.scopes import (
+    APPROVE,
+    CANCEL,
+    CREATE,
+    DISPATCH,
+    EXECUTE_INLINE,
+    OPS,
+    READ,
 )
 from max_agent.api.token_registry import AuthContext
 from max_agent.db.session import session_scope
@@ -25,6 +34,7 @@ from max_agent.models.aer import EconomicsReport, ExportRetryResult, TaskTrace
 from max_agent.models.enums import TaskStatus
 from max_agent.models.schemas import (
     ApproveRequest,
+    DispatchRequest,
     InboundEvent,
     RejectRequest,
     ScheduleRequest,
@@ -64,13 +74,13 @@ def whoami(context: AuthContext = Depends(require_any_token)) -> dict:
 
 
 @router.get("/telemetry")
-def telemetry(context: AuthContext = Depends(require_principal)) -> dict:
+def telemetry(context: AuthContext = Depends(require_scope(READ))) -> dict:
     """In-process counters and recent spans. Not the economics report at /metrics."""
     return get_telemetry().snapshot()
 
 
 @router.post("/tasks", response_model=TaskRead)
-def create_task(body: TaskCreate, context: AuthContext = Depends(require_principal)) -> TaskRead:
+def create_task(body: TaskCreate, context: AuthContext = Depends(require_scope(CREATE))) -> TaskRead:
     try:
         with session_scope() as session:
             return TaskService(session).create(body, created_by=context.principal)
@@ -83,7 +93,7 @@ def create_task(body: TaskCreate, context: AuthContext = Depends(require_princip
 @router.post("/tasks/graph", response_model=list[TaskRead])
 def create_task_graph(
     body: TaskGraphCreate,
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(CREATE)),
 ) -> list[TaskRead]:
     try:
         with session_scope() as session:
@@ -98,7 +108,7 @@ def create_task_graph(
 def list_tasks(
     status: TaskStatus | None = None,
     limit: int = Query(default=100, ge=1, le=500),
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(READ)),
 ) -> list[TaskRead]:
     with session_scope() as session:
         return TaskService(session).list_tasks(status=status, limit=limit, created_by=context.principal)
@@ -110,7 +120,7 @@ def query_tasks(
     status: TaskStatus | None = None,
     limit: int = Query(default=25, ge=1, le=100),
     cursor: str | None = Query(default=None, max_length=1024),
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(READ)),
 ) -> TaskPage:
     try:
         with session_scope() as session:
@@ -124,7 +134,7 @@ def query_events(
     task_id: str,
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = Query(default=None, max_length=1024),
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(READ)),
 ) -> TaskEventPage:
     try:
         with session_scope() as session:
@@ -137,7 +147,7 @@ def query_events(
 
 
 @router.get("/tasks/{task_id}", response_model=TaskRead)
-def get_task(task_id: str, context: AuthContext = Depends(require_principal)) -> TaskRead:
+def get_task(task_id: str, context: AuthContext = Depends(require_scope(READ))) -> TaskRead:
     try:
         with session_scope() as session:
             service = TaskService(session)
@@ -150,7 +160,7 @@ def get_task(task_id: str, context: AuthContext = Depends(require_principal)) ->
 @router.post("/queue/run", response_model=list[TaskRead])
 def run_queue(
     limit: int = Query(default=50, ge=1, le=500),
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(EXECUTE_INLINE)),
 ) -> list[TaskRead]:
     """Run ready tasks in fair order. Does not start work past the concurrency cap."""
     return Scheduler(created_by=context.principal).run_queue(max_tasks=limit)
@@ -160,7 +170,7 @@ def run_queue(
 def schedule_task(
     task_id: str,
     body: ScheduleRequest | None = None,
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(EXECUTE_INLINE)),
 ) -> TaskRead:
     # Scheduler opens its own short transactions. Do not hold a session across worker.run().
     try:
@@ -174,7 +184,7 @@ def schedule_task(
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskRead)
-def cancel_task(task_id: str, context: AuthContext = Depends(require_principal)) -> TaskRead:
+def cancel_task(task_id: str, context: AuthContext = Depends(require_scope(CANCEL))) -> TaskRead:
     try:
         with session_scope() as session:
             authorize_task(session, task_id, context.principal)
@@ -186,7 +196,7 @@ def cancel_task(task_id: str, context: AuthContext = Depends(require_principal))
 
 
 @router.get("/tasks/{task_id}/status")
-def task_status(task_id: str, context: AuthContext = Depends(require_principal)) -> dict:
+def task_status(task_id: str, context: AuthContext = Depends(require_scope(READ))) -> dict:
     """On-demand machine envelope. Does not run the worker."""
     try:
         with session_scope() as session:
@@ -204,7 +214,7 @@ def task_status(task_id: str, context: AuthContext = Depends(require_principal))
 def approve_task(
     task_id: str,
     body: ApproveRequest | None = None,
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(APPROVE)),
 ) -> dict:
     body = body or ApproveRequest()
     require_actor_match(context.principal, body.actor)
@@ -229,7 +239,7 @@ def approve_task(
 def reject_task(
     task_id: str,
     body: RejectRequest | None = None,
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(APPROVE)),
 ) -> dict:
     body = body or RejectRequest()
     require_actor_match(context.principal, body.actor)
@@ -242,6 +252,32 @@ def reject_task(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/dispatch")
+def dispatch_task(
+    task_id: str,
+    body: DispatchRequest | None = None,
+    context: AuthContext = Depends(require_scope(DISPATCH)),
+) -> dict:
+    """Hand an approved task over to its worker.
+
+    The full dispatch gate (version / content-hash checks, lease hand-off) is a
+    later task. Here we authenticate with the dispatch scope and resolve the
+    task: an unknown task is a 404.
+    """
+    try:
+        with session_scope() as session:
+            service = TaskService(session)
+            authorize_task(session, task_id, context.principal)
+            task = service.get(task_id)
+            dispatch = getattr(service, "dispatch", None)
+            if dispatch is None:
+                raise HTTPException(status_code=501, detail="dispatch is not implemented yet")
+            task = dispatch(task_id) or task
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return envelope(command="dispatch", task=task)
 
 
 @router.post("/inbound/webhook")
@@ -274,7 +310,7 @@ async def inbound_webhook(request: Request) -> dict:
 
 
 @router.get("/tasks/{task_id}/trace", response_model=TaskTrace)
-def task_trace(task_id: str, context: AuthContext = Depends(require_principal)) -> TaskTrace:
+def task_trace(task_id: str, context: AuthContext = Depends(require_scope(READ))) -> TaskTrace:
     try:
         with session_scope() as session:
             authorize_task(session, task_id, context.principal)
@@ -284,13 +320,13 @@ def task_trace(task_id: str, context: AuthContext = Depends(require_principal)) 
 
 
 @router.get("/metrics", response_model=EconomicsReport)
-def metrics(context: AuthContext = Depends(require_principal)) -> EconomicsReport:
+def metrics(context: AuthContext = Depends(require_scope(READ))) -> EconomicsReport:
     with session_scope() as session:
         return TaskService(session).metrics(created_by=context.principal)
 
 
 @router.post("/aer/retry", response_model=ExportRetryResult)
-def retry_aer_exports(context: AuthContext = Depends(require_principal)) -> ExportRetryResult:
+def retry_aer_exports(context: AuthContext = Depends(require_scope(OPS))) -> ExportRetryResult:
     """Redeliver pending and failed AER rows. Does not run tasks."""
     with session_scope() as session:
         return TaskService(session).retry_aer_exports()
@@ -300,7 +336,7 @@ def retry_aer_exports(context: AuthContext = Depends(require_principal)) -> Expo
 def list_events(
     task_id: str,
     limit: int = Query(default=200, ge=1, le=1000),
-    context: AuthContext = Depends(require_principal),
+    context: AuthContext = Depends(require_scope(READ)),
 ) -> list[TaskEventRead]:
     try:
         with session_scope() as session:
