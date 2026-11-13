@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,6 +24,16 @@ _SECRET_NAMES = frozenset(
         "GH_TOKEN",
     }
 )
+
+REGISTRY_TOKENS: dict[str, dict[str, Any]] = {
+    "test-read": {"secret": "test-read-secret", "scopes": ["read"]},
+    "test-create": {"secret": "test-create-secret", "scopes": ["create"]},
+    "test-approve": {"secret": "test-approve-secret", "scopes": ["approve"]},
+    "test-dispatch": {"secret": "test-dispatch-secret", "scopes": ["dispatch"]},
+    "test-cancel": {"secret": "test-cancel-secret", "scopes": ["cancel"]},
+    "test-execute-inline": {"secret": "test-execute-inline-secret", "scopes": ["execute_inline"]},
+    "test-ops": {"secret": "test-ops-secret", "scopes": ["ops"]},
+}
 
 
 @pytest.fixture(autouse=True)
@@ -49,8 +62,67 @@ def _isolate_host_cli_and_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _api_test_credentials(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("MAX_AGENT_API_TOKEN", "test-api-token")
-    monkeypatch.setenv("MAX_AGENT_API_ACTOR", "user")
+    """The legacy MAX_AGENT_API_TOKEN is no longer an all-powerful credential.
+
+    Issue #65 replaces it with an explicit token registry, so the environment
+    variable must not silently grant full access anymore.
+    """
+    monkeypatch.delenv("MAX_AGENT_API_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def api_token_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """把令牌注册表写到临时 JSON 文件，并通过环境变量指向它。
+
+    规格禁止旧 MAX_AGENT_API_TOKEN 自动全权，因此这里显式删除该环境变量。
+    """
+    path = tmp_path / "token_registry.json"
+    payload = {
+        token_id: {
+            "secret_sha256": hashlib.sha256(spec["secret"].encode("utf-8")).hexdigest(),
+            "scopes": list(spec["scopes"]),
+            "enabled": True,
+        }
+        for token_id, spec in REGISTRY_TOKENS.items()
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    monkeypatch.setenv("MAX_AGENT_API_TOKEN_REGISTRY", str(path))
+    monkeypatch.setenv("MAX_AGENT_API_ACTOR", "tester")
+    monkeypatch.delenv("MAX_AGENT_API_TOKEN", raising=False)
+    return path
+
+
+@pytest.fixture()
+def auth_header():
+    def _make(token_id: str) -> dict[str, str]:
+        secret = REGISTRY_TOKENS[token_id]["secret"]
+        return {"Authorization": f"Bearer {secret}"}
+
+    return _make
+
+
+@pytest.fixture()
+def make_task_body():
+    def _make(**overrides: Any) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "goal": "demo goal",
+            "acceptance_criteria": ["echo done"],
+            "worker_kind": "echo",
+            "worker_payload": {"cmd": ["echo", "hi"]},
+            "tags": [],
+            "dependencies": [],
+            "has_side_effects": False,
+            "issue_ref": "Wike-CHI/max-agent#65",
+            "priority": 50,
+            "timeout_seconds": 60,
+            "max_attempts": 1,
+            "max_cost_units": 0,
+            "allow_auto_retry_side_effects": False,
+        }
+        body.update(overrides)
+        return body
+
+    return _make
 
 
 @pytest.fixture(autouse=True)

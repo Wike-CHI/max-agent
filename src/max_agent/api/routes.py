@@ -6,7 +6,13 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
-from max_agent.api.auth import authorize_task, require_actor_match, require_principal
+from max_agent.api.auth import (
+    authorize_task,
+    require_actor_match,
+    require_any_token,
+    require_principal,
+)
+from max_agent.api.token_registry import AuthContext
 from max_agent.db.session import session_scope
 from max_agent.ops.health import database_ready, liveness
 from max_agent.ops.telemetry import get_telemetry
@@ -47,17 +53,27 @@ def ready() -> dict[str, str]:
     return {"status": "ready", "database": "ok"}
 
 
+@router.get("/auth/whoami")
+def whoami(context: AuthContext = Depends(require_any_token)) -> dict:
+    """返回调用者身份与 scope 集合；不要求 read，不返回任何秘密或哈希。"""
+    return {
+        "token_id": context.token_id,
+        "principal": context.principal,
+        "scopes": sorted(context.scopes),
+    }
+
+
 @router.get("/telemetry")
-def telemetry(principal: str = Depends(require_principal)) -> dict:
+def telemetry(context: AuthContext = Depends(require_principal)) -> dict:
     """In-process counters and recent spans. Not the economics report at /metrics."""
     return get_telemetry().snapshot()
 
 
 @router.post("/tasks", response_model=TaskRead)
-def create_task(body: TaskCreate, principal: str = Depends(require_principal)) -> TaskRead:
+def create_task(body: TaskCreate, context: AuthContext = Depends(require_principal)) -> TaskRead:
     try:
         with session_scope() as session:
-            return TaskService(session).create(body, created_by=principal)
+            return TaskService(session).create(body, created_by=context.principal)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
@@ -65,10 +81,13 @@ def create_task(body: TaskCreate, principal: str = Depends(require_principal)) -
 
 
 @router.post("/tasks/graph", response_model=list[TaskRead])
-def create_task_graph(body: TaskGraphCreate, principal: str = Depends(require_principal)) -> list[TaskRead]:
+def create_task_graph(
+    body: TaskGraphCreate,
+    context: AuthContext = Depends(require_principal),
+) -> list[TaskRead]:
     try:
         with session_scope() as session:
-            return TaskService(session).create_graph(body.nodes, created_by=principal)
+            return TaskService(session).create_graph(body.nodes, created_by=context.principal)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
@@ -79,10 +98,10 @@ def create_task_graph(body: TaskGraphCreate, principal: str = Depends(require_pr
 def list_tasks(
     status: TaskStatus | None = None,
     limit: int = Query(default=100, ge=1, le=500),
-    principal: str = Depends(require_principal),
+    context: AuthContext = Depends(require_principal),
 ) -> list[TaskRead]:
     with session_scope() as session:
-        return TaskService(session).list_tasks(status=status, limit=limit, created_by=principal)
+        return TaskService(session).list_tasks(status=status, limit=limit, created_by=context.principal)
 
 
 @router.get("/tasks/query", response_model=TaskPage)
@@ -91,11 +110,11 @@ def query_tasks(
     status: TaskStatus | None = None,
     limit: int = Query(default=25, ge=1, le=100),
     cursor: str | None = Query(default=None, max_length=1024),
-    principal: str = Depends(require_principal),
+    context: AuthContext = Depends(require_principal),
 ) -> TaskPage:
     try:
         with session_scope() as session:
-            return TaskQuery(session, principal).tasks(q=q, status=status, limit=limit, cursor=cursor)
+            return TaskQuery(session, context.principal).tasks(q=q, status=status, limit=limit, cursor=cursor)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -105,12 +124,12 @@ def query_events(
     task_id: str,
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = Query(default=None, max_length=1024),
-    principal: str = Depends(require_principal),
+    context: AuthContext = Depends(require_principal),
 ) -> TaskEventPage:
     try:
         with session_scope() as session:
-            authorize_task(session, task_id, principal)
-            return TaskQuery(session, principal).events(task_id, limit=limit, cursor=cursor)
+            authorize_task(session, task_id, context.principal)
+            return TaskQuery(session, context.principal).events(task_id, limit=limit, cursor=cursor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -118,11 +137,11 @@ def query_events(
 
 
 @router.get("/tasks/{task_id}", response_model=TaskRead)
-def get_task(task_id: str, principal: str = Depends(require_principal)) -> TaskRead:
+def get_task(task_id: str, context: AuthContext = Depends(require_principal)) -> TaskRead:
     try:
         with session_scope() as session:
             service = TaskService(session)
-            authorize_task(session, task_id, principal)
+            authorize_task(session, task_id, context.principal)
             return service.get(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -131,23 +150,23 @@ def get_task(task_id: str, principal: str = Depends(require_principal)) -> TaskR
 @router.post("/queue/run", response_model=list[TaskRead])
 def run_queue(
     limit: int = Query(default=50, ge=1, le=500),
-    principal: str = Depends(require_principal),
+    context: AuthContext = Depends(require_principal),
 ) -> list[TaskRead]:
     """Run ready tasks in fair order. Does not start work past the concurrency cap."""
-    return Scheduler(created_by=principal).run_queue(max_tasks=limit)
+    return Scheduler(created_by=context.principal).run_queue(max_tasks=limit)
 
 
 @router.post("/tasks/{task_id}/schedule", response_model=TaskRead)
 def schedule_task(
     task_id: str,
     body: ScheduleRequest | None = None,
-    principal: str = Depends(require_principal),
+    context: AuthContext = Depends(require_principal),
 ) -> TaskRead:
     # Scheduler opens its own short transactions. Do not hold a session across worker.run().
     try:
         with session_scope() as session:
-            authorize_task(session, task_id, principal)
-        return Scheduler(created_by=principal).run_one(task_id, body)
+            authorize_task(session, task_id, context.principal)
+        return Scheduler(created_by=context.principal).run_one(task_id, body)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -155,10 +174,10 @@ def schedule_task(
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskRead)
-def cancel_task(task_id: str, principal: str = Depends(require_principal)) -> TaskRead:
+def cancel_task(task_id: str, context: AuthContext = Depends(require_principal)) -> TaskRead:
     try:
         with session_scope() as session:
-            authorize_task(session, task_id, principal)
+            authorize_task(session, task_id, context.principal)
             return TaskService(session).cancel(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -167,12 +186,12 @@ def cancel_task(task_id: str, principal: str = Depends(require_principal)) -> Ta
 
 
 @router.get("/tasks/{task_id}/status")
-def task_status(task_id: str, principal: str = Depends(require_principal)) -> dict:
+def task_status(task_id: str, context: AuthContext = Depends(require_principal)) -> dict:
     """On-demand machine envelope. Does not run the worker."""
     try:
         with session_scope() as session:
             service = TaskService(session)
-            authorize_task(session, task_id, principal)
+            authorize_task(session, task_id, context.principal)
             task = service.get(task_id)
             events = service.list_events(task_id)
             verification = service.latest_verification(task_id)
@@ -185,16 +204,16 @@ def task_status(task_id: str, principal: str = Depends(require_principal)) -> di
 def approve_task(
     task_id: str,
     body: ApproveRequest | None = None,
-    principal: str = Depends(require_principal),
+    context: AuthContext = Depends(require_principal),
 ) -> dict:
     body = body or ApproveRequest()
-    require_actor_match(principal, body.actor)
+    require_actor_match(context.principal, body.actor)
     try:
         with session_scope() as session:
-            authorize_task(session, task_id, principal)
+            authorize_task(session, task_id, context.principal)
             task = TaskService(session).approve(
                 task_id,
-                actor=principal,
+                actor=context.principal,
                 note=body.note,
                 scope=list(body.scope),
                 ttl_seconds=body.ttl_seconds,
@@ -210,14 +229,14 @@ def approve_task(
 def reject_task(
     task_id: str,
     body: RejectRequest | None = None,
-    principal: str = Depends(require_principal),
+    context: AuthContext = Depends(require_principal),
 ) -> dict:
     body = body or RejectRequest()
-    require_actor_match(principal, body.actor)
+    require_actor_match(context.principal, body.actor)
     try:
         with session_scope() as session:
-            authorize_task(session, task_id, principal)
-            task = TaskService(session).reject(task_id, actor=principal, note=body.note)
+            authorize_task(session, task_id, context.principal)
+            task = TaskService(session).reject(task_id, actor=context.principal, note=body.note)
         return envelope(command="reject", task=task)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -255,23 +274,23 @@ async def inbound_webhook(request: Request) -> dict:
 
 
 @router.get("/tasks/{task_id}/trace", response_model=TaskTrace)
-def task_trace(task_id: str, principal: str = Depends(require_principal)) -> TaskTrace:
+def task_trace(task_id: str, context: AuthContext = Depends(require_principal)) -> TaskTrace:
     try:
         with session_scope() as session:
-            authorize_task(session, task_id, principal)
+            authorize_task(session, task_id, context.principal)
             return TaskService(session).trace(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/metrics", response_model=EconomicsReport)
-def metrics(principal: str = Depends(require_principal)) -> EconomicsReport:
+def metrics(context: AuthContext = Depends(require_principal)) -> EconomicsReport:
     with session_scope() as session:
-        return TaskService(session).metrics(created_by=principal)
+        return TaskService(session).metrics(created_by=context.principal)
 
 
 @router.post("/aer/retry", response_model=ExportRetryResult)
-def retry_aer_exports(principal: str = Depends(require_principal)) -> ExportRetryResult:
+def retry_aer_exports(context: AuthContext = Depends(require_principal)) -> ExportRetryResult:
     """Redeliver pending and failed AER rows. Does not run tasks."""
     with session_scope() as session:
         return TaskService(session).retry_aer_exports()
@@ -281,11 +300,11 @@ def retry_aer_exports(principal: str = Depends(require_principal)) -> ExportRetr
 def list_events(
     task_id: str,
     limit: int = Query(default=200, ge=1, le=1000),
-    principal: str = Depends(require_principal),
+    context: AuthContext = Depends(require_principal),
 ) -> list[TaskEventRead]:
     try:
         with session_scope() as session:
-            authorize_task(session, task_id, principal)
+            authorize_task(session, task_id, context.principal)
             return TaskService(session).list_events(task_id, limit=limit)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
