@@ -59,5 +59,7 @@ def task_to_read(row: TaskRow) -> TaskRead:
         approval_expires_at=row.approval_expires_at,
         approval_decision=row.approval_decision,
         cancel_requested_at=row.cancel_requested_at,
-        issue_ref=row.issue_ref
+        issue_ref=row.issue_ref,
+        version=int(row.version or 0),
+        awaiting_dispatch=bool(row.awaiting_dispatch),
     )

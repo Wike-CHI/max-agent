@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -69,6 +70,9 @@ class TaskRow(Base):
     issue_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
     budget_ceilings: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # optimistic lock
+    awaiting_dispatch: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow

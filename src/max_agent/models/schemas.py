@@ -55,6 +55,10 @@ class TaskCreate(BaseModel):
         max_length=256,
         description="Caller-supplied issue id or URL. Never inferred from the goal text.",
     )
+    require_dispatch: bool = Field(
+        default=False,
+        description="When true, the task must be dispatched explicitly before it runs.",
+    )
 
     @field_validator("acceptance_criteria")
     @classmethod
@@ -78,6 +82,10 @@ class GraphNode(BaseModel):
     has_side_effects: bool = False
     tags: list[str] = Field(default_factory=list)
     issue_ref: str | None = Field(default=None, max_length=256)
+    require_dispatch: bool = Field(
+        default=False,
+        description="When true, the node's task must be dispatched explicitly before it runs.",
+    )
 
     @field_validator("acceptance_criteria")
     @classmethod
@@ -98,11 +106,16 @@ class GraphNode(BaseModel):
             has_side_effects=self.has_side_effects,
             tags=list(self.tags),
             issue_ref=self.issue_ref,
+            require_dispatch=self.require_dispatch,
         )
 
 
 class TaskGraphCreate(BaseModel):
     nodes: list[GraphNode] = Field(..., min_length=1)
+    require_dispatch: bool = Field(
+        default=False,
+        description="Graph-level default: nodes must be dispatched explicitly before they run.",
+    )
 
 
 class TaskRead(BaseModel):
@@ -139,6 +152,8 @@ class TaskRead(BaseModel):
     approval_decision: str | None = None
     cancel_requested_at: datetime | None = None
     issue_ref: str | None = None
+    version: int = 0
+    awaiting_dispatch: bool = False
     idempotent_replay: bool = Field(
         default=False,
         exclude=True,
