@@ -97,7 +97,11 @@ def create_task_graph(
 ) -> list[TaskRead]:
     try:
         with session_scope() as session:
-            return TaskService(session).create_graph(body.nodes, created_by=context.principal)
+            return TaskService(session).create_graph(
+                body.nodes,
+                created_by=context.principal,
+                require_dispatch=body.require_dispatch,
+            )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
