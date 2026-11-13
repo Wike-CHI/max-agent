@@ -69,7 +69,7 @@
 本文档中「scope」与「tag 范围」是两个不同概念，全文严格区分：
 
 - **API scope（API scope 集合）**：Bearer 凭据的能力集合，属于 HTTP 认证层。本文档讨论的 `read` / `create` / `dispatch` / `approve` / `cancel` / `execute_inline` / `ops` 都是 API scope。
-- **审批 tag 范围（敏感 tag 范围）**：`AuthorizeRequest.scope` / `ApproveRequest.scope` 使用的敏感标签集合，取值如 `delete` / `deploy` / `payment` / `publish` / `permission` / `production` / `external_write`。它描述的是「这次审批覆盖哪些敏感动作」，与 API scope 无继承、无映射关系。
+- **审批 tag 范围（敏感 tag 范围）**：`ApproveRequest.scope` 使用的敏感标签集合，取值如 `delete` / `deploy` / `payment` / `publish` / `permission` / `production` / `external_write`。它描述的是「这次审批覆盖哪些敏感动作」，与 API scope 无继承、无映射关系。
 
 举例：持有 `approve` API scope 的 token 仍然必须显式提供覆盖全部敏感 tag 的审批 tag 范围，才可能审批一个带 `payment` tag 的任务；持有 `read` API scope 与不持有任何 API scope 是完全不同的两件事。
 
@@ -155,7 +155,7 @@ CLI 与 MCP 在本机进程内使用 `configured_principal()`，不经过 HTTP �
 
 - 匿名仅允许 `GET /health` 与 `GET /ready`。
 - 其余 GET（tasks、query、status、trace、events、metrics 等）需要 `read` scope。
-- `GET /v1/telemetry` 一并要求 `read` scope。若现状中该端点尚未挂认证依赖，P1 一并补上，避免在引入 scope 体系后留下新的匿名缺口。
+- `GET /v1/telemetry` 在当前 master 已挂 `require_principal`。本阶段将其映射为 `read` scope，不另开匿名缺口。
 
 ---
 
@@ -415,7 +415,7 @@ P1 的 Console 取消**只调用现有 `POST /v1/tasks/{id}/cancel`**，加上 `
 - [ ] dispatch 后 `awaiting_dispatch=false`，状态按依赖/敏感 tag 进入 `blocked`/`waiting_approval`/`ready`。
 - [ ] dispatch 端点**不**在 API 进程内执行 worker（断言无 worker 调用）。
 - [ ] `POST /v1/inbound/webhook` 仍走签名认证，签名错误 → 拒绝；且不因 Bearer scope 体系而改变创建语义。
-- [ ] `GET /v1/telemetry` 需要 `read`（若现状未挂认证，本阶段补上）。
+- [ ] `GET /v1/telemetry` 需要 `read`（当前已 `require_principal`，本阶段映射为 `read`）。
 - [ ] 现有 Cloudflare 测试仍断言写路径被禁止（404/405），未被本阶段放宽。
 
 ### 阶段 2（Console UI）
@@ -484,7 +484,7 @@ P1 的 Console 取消**只调用现有 `POST /v1/tasks/{id}/cancel`**，加上 `
 7. **执行与审批凭据分离**：同一 token id 不得同时拥有 `dispatch` 与 `approve`，也不得同时拥有 `create` 与 `approve`；加载期强制拒绝。
 8. **所有权不变**：`created_by == principal`；多 token 共享同一 actor；不做跨主体审批。
 9. **whoami**：任一 enabled 令牌可调用，不额外要求 `read`，不返回秘密。
-10. **匿名范围**：仅 `GET /health`、`GET /ready`；`GET /v1/telemetry` 需要 `read`（现状未挂认证则本 P1 补上）。
+10. **匿名范围**：仅 `GET /health`、`GET /ready`；`GET /v1/telemetry` 当前已 `require_principal`，本阶段映射为 `read`。
 11. **webhook**：保持签名认证，不纳入 Bearer scope，不进入 Console，`require_dispatch` 默认 false，创建语义维持现有自动 `_apply_initial_status`。
 12. **CLI/MCP**：继续走进程内 `TaskService` 与 `configured_principal()`，HTTP 层一律走注册表。
 13. **调度模型**：新增 `awaiting_dispatch` 布尔列（默认 false）；`require_dispatch` 默认 false 以保持现有行为；为 true 时任务保持 `pending` 且 `awaiting_dispatch=true`，派发时一次性复用 `_apply_initial_status`。
