@@ -106,12 +106,25 @@ class TaskService:
         assert_acyclic(edges)
         row = self._insert_new(task_id, data, [str(item) for item in data.dependencies], created_by=created_by)
         self.session.flush()
-        self._apply_initial_status(row)
+        if not bool(getattr(data, "require_dispatch", False)):
+            # A dispatch-gated task stays pending until it is dispatched. It must
+            # not become ready (or waiting_approval) just because it was created.
+            self._apply_initial_status(row)
         self.session.flush()
         return self._to_read(row)
 
-    def create_graph(self, nodes: list[GraphNode], *, created_by: str = "user") -> list[TaskRead]:
-        """Insert a DAG. A cycle or unknown key stores nothing."""
+    def create_graph(
+        self,
+        nodes: list[GraphNode],
+        *,
+        created_by: str = "user",
+        require_dispatch: bool = False,
+    ) -> list[TaskRead]:
+        """Insert a DAG. A cycle or unknown key stores nothing.
+
+        `require_dispatch` gates every new node: each task stays pending until
+        it is dispatched on its own. A node may also ask for the gate on its own.
+        """
         if not nodes:
             raise ValueError("graph has no nodes")
         keys = [node.key for node in nodes]
@@ -149,11 +162,26 @@ class TaskService:
         assert_acyclic(edges)
 
         rows: list[TaskRow] = []
+        gated: set[str] = set()
         for node in nodes:
             task_id = key_to_id[node.key]
-            rows.append(self._insert_new(task_id, node.to_create(), resolved[task_id], created_by=created_by))
+            node_gated = bool(require_dispatch) or bool(node.require_dispatch)
+            if node_gated:
+                gated.add(task_id)
+            rows.append(
+                self._insert_new(
+                    task_id,
+                    node.to_create(),
+                    resolved[task_id],
+                    created_by=created_by,
+                    require_dispatch=node_gated,
+                )
+            )
         self.session.flush()
         for row in rows:
+            if row.id in gated:
+                # Gated nodes stay pending until they are dispatched.
+                continue
             self._apply_initial_status(row)
         self.session.flush()
         return [self._to_read(row) for row in rows]
@@ -223,7 +251,13 @@ class TaskService:
             "approval_decision": "granted",
             "last_error": None,
         }
-        if status in {TaskStatus.BLOCKED, TaskStatus.WAITING_APPROVAL} and deps_satisfied(self.session, row):
+        if (
+            status in {TaskStatus.BLOCKED, TaskStatus.WAITING_APPROVAL}
+            and not bool(row.awaiting_dispatch)
+            and deps_satisfied(self.session, row)
+        ):
+            # An undispatched task keeps its gate: approval alone must not make
+            # it runnable.
             transition_task(
                 self.session,
                 row,
@@ -299,6 +333,31 @@ class TaskService:
 
         return Scheduler(self.session, worker_id=self.worker_id).run_one(task_id, req)
 
+    def dispatch(self, task_id: str) -> TaskRead:
+        """Release a dispatch-gated task into the normal state machine.
+
+        This is a state transition only: no worker runs here, no lease is
+        taken and the scheduler is never called. The task leaves the gate and
+        then follows the normal rules (dependencies, sensitive tags).
+
+        Dispatching a task that is not awaiting dispatch is a no-op: the read
+        model comes back unchanged and the version is not bumped.
+        """
+        row = self._get_row(task_id)
+        if not bool(row.awaiting_dispatch):
+            return self._to_read(row)
+
+        gate = {"awaiting_dispatch": False}
+        if TaskStatus(row.status) not in TERMINAL:
+            self._apply_initial_status(row, extra=gate)
+        if bool(row.awaiting_dispatch):
+            # Nothing transitioned (the task was already past the initial
+            # status); clear the gate on its own.
+            if not cas_update(self.session, row, gate):
+                raise LeaseHeldError(f"concurrent update on task {task_id}")
+        self.session.flush()
+        return self._to_read(row)
+
     def reopen(self, task_id: str) -> TaskRead:
         """Manual reopen of failed task → ready."""
         row = self._get_row(task_id)
@@ -335,11 +394,18 @@ class TaskService:
         return replay
 
     def _insert_new(
-        self, task_id: str, data: TaskCreate, dependencies: list[str], *, created_by: str
+        self,
+        task_id: str,
+        data: TaskCreate,
+        dependencies: list[str],
+        *,
+        created_by: str,
+        require_dispatch: bool | None = None,
     ) -> TaskRow:
         budget = data.budget
         timeout = data.timeout_seconds if data.timeout_seconds is not None else budget.timeout_seconds
         issue_ref = explicit_issue_ref(data.issue_ref, data.tags)
+        gated = bool(getattr(data, "require_dispatch", False)) or bool(require_dispatch)
         row = TaskRow(
             id=task_id,
             goal=data.goal,
@@ -364,6 +430,7 @@ class TaskService:
             created_at=utcnow(),
             updated_at=utcnow(),
             version=1,
+            awaiting_dispatch=gated,
         )
         self.session.add(row)
         self.session.flush()
@@ -382,11 +449,17 @@ class TaskService:
         )
         return row
 
-    def _apply_initial_status(self, row: TaskRow) -> None:
+    def _apply_initial_status(self, row: TaskRow, *, extra: dict[str, Any] | None = None) -> None:
+        """Give a task its starting status.
+
+        `extra` holds column updates that ride along with the transition — the
+        dispatch gate uses it to clear `awaiting_dispatch` in the same write.
+        """
+        gate_extra = dict(extra or {})
         if list(row.dependencies or []) and not deps_satisfied(self.session, row):
-            self._transition(row, TaskStatus.BLOCKED, "waiting on dependencies")
+            self._transition(row, TaskStatus.BLOCKED, "waiting on dependencies", **gate_extra)
         elif TaskStatus(row.status) == TaskStatus.PENDING:
-            self._transition(row, TaskStatus.READY, "no dependencies; marked ready")
+            self._transition(row, TaskStatus.READY, "no dependencies; marked ready", **gate_extra)
 
         found = sensitive_tags(list(row.tags or []))
         if not found:
@@ -396,7 +469,7 @@ class TaskService:
             if not cas_update(self.session, row, {"last_error": reason}):
                 raise LeaseHeldError(f"concurrent update on task {row.id}")
         else:
-            self._transition(row, TaskStatus.WAITING_APPROVAL, reason, last_error=reason)
+            self._transition(row, TaskStatus.WAITING_APPROVAL, reason, last_error=reason, **gate_extra)
         self.journal.append(row.id, EventType.APPROVAL_REQUIRED, reason, {"tags": found})
 
     def _transition(self, row: TaskRow, target: TaskStatus, message: str, **extra: Any) -> None:

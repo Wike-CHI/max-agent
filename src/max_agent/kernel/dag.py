@@ -93,7 +93,9 @@ def wake_satisfied(session: Session, *, now: datetime) -> list[str]:
     """Move blocked tasks whose dependencies all succeeded.
 
     Side-effect confirmation stays blocked. An approval gate becomes
-    `waiting_approval` instead of being mixed into `blocked`.
+    `waiting_approval` instead of being mixed into `blocked`. A task that is
+    still waiting for its dispatch keeps the gate: satisfied dependencies do
+    not let it run early.
     """
     journal = Journal(session)
     rows = (
@@ -103,6 +105,8 @@ def wake_satisfied(session: Session, *, now: datetime) -> list[str]:
     )
     woken: list[str] = []
     for row in rows:
+        if getattr(row, "awaiting_dispatch", False):
+            continue
         if not deps_satisfied(session, row):
             continue
         hold = _hold_for(row, now)
