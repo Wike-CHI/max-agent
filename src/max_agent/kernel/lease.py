@@ -316,6 +316,11 @@ def claim_in_session(
     if status in _TERMINAL_SCHEDULE:
         raise ValueError(f"cannot schedule terminal task status={status}")
 
+    # A dispatch-gated task must not be claimed: the gate is only released by
+    # an explicit dispatch, so claiming here would run it past the gate.
+    if bool(getattr(row, "awaiting_dispatch", False)):
+        raise ValueError(f"task is awaiting dispatch: {task_id}")
+
     recovered_now = False
     if status in _IN_FLIGHT:
         if not lease_expired(row, now):
@@ -337,6 +342,9 @@ def claim_in_session(
         status = TaskStatus(row.status)
         if status in _TERMINAL_SCHEDULE:
             raise ValueError(f"cannot schedule terminal task status={status}")
+        # Recovery rewrote the row: re-check the gate on the recovered row.
+        if bool(getattr(row, "awaiting_dispatch", False)):
+            raise ValueError(f"task is awaiting dispatch: {task_id}")
 
     if automatic and status in {TaskStatus.READY, TaskStatus.RETRY_WAIT}:
         nxt = as_utc(row.next_retry_at)

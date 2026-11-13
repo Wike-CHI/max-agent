@@ -68,6 +68,10 @@ def pick_next(
     for row in rows:
         if row.id in exclude:
             continue
+        if bool(getattr(row, "awaiting_dispatch", False)):
+            # A dispatch-gated task is not queueable: only an explicit dispatch
+            # may release it, so the automatic queue must skip it.
+            continue
         nxt = as_utc(row.next_retry_at)
         if nxt is not None and current is not None and nxt > current:
             continue

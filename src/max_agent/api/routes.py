@@ -27,6 +27,7 @@ from max_agent.ops.health import database_ready, liveness
 from max_agent.ops.telemetry import get_telemetry
 from max_agent.entry.contract import envelope
 from max_agent.entry.webhook import WebhookError, accept_inbound, verify_signature
+from max_agent.kernel.errors import LeaseHeldError
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
 from max_agent.kernel.query import TaskQuery
@@ -281,6 +282,8 @@ def dispatch_task(
             task = dispatch(task_id) or task
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (LeaseHeldError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return envelope(command="dispatch", task=task)
 
 
