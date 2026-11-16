@@ -3,7 +3,7 @@
 Contract version 1. Inputs come from WorkerContext (goal, acceptance, timeout)
 and worker_payload:
 
-- vendor: auto | stub | grok | codex | claude
+- vendor: auto | stub | grok | codex | claude | codebuddy (explicit only)
 - workspace_root: directory under /tmp (or MAX_AGENT_WORKSPACE_ROOT)
 - repo_path: optional tree to copy; the source checkout is not edited
 - cancel_file: touched by the caller to SIGTERM the child
@@ -120,13 +120,16 @@ _NON_RECOVERABLE = frozenset(
     }
 )
 _VENDOR_ORDER = ("grok", "codex", "claude")
-_VENDOR_BINARY = {"grok": "grok", "codex": "codex", "claude": "claude"}
-_VENDOR_PROVIDER = {"grok": "xai", "codex": "openai", "claude": "anthropic"}
+# CodeBuddy is probed but not auto-selected until live ACP/CLI acceptance is proven.
+_PROBE_ORDER = (*_VENDOR_ORDER, "codebuddy")
+_VENDOR_BINARY = {"grok": "grok", "codex": "codex", "claude": "claude", "codebuddy": "codebuddy"}
+_VENDOR_PROVIDER = {"grok": "xai", "codex": "openai", "claude": "anthropic", "codebuddy": "codebuddy"}
 _COST_LEDGERS = frozenset({"grok_bot_quota", "cli_quota", "api_spend"})
 _USAGE_MARKERS = frozenset({"measured", "estimate"})
 _USD_COST_KEYS = ("total_cost_usd", "cost_usd", "costUSD")
-_VENDOR_VERSION = {"grok": ("version",), "codex": ("--version",), "claude": ("--version",)}
+_VENDOR_VERSION = {"grok": ("version",), "codex": ("--version",), "claude": ("--version",), "codebuddy": ("--version",)}
 _VENDOR_PASSTHROUGH = {
+    "codebuddy": ("CODEBUDDY_API_KEY",),
     "grok": ("XAI_API_KEY",),
     "codex": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
     "claude": (
@@ -277,6 +280,10 @@ def build_exec_argv(
             str(workspace / ".max-agent" / "cli-last-message.txt"),
             prompt,
         ]
+    elif vendor == "codebuddy":
+        # WorkBuddy Lite documents this headless CLI interface; ACP is a later adapter.
+        # Omit unverified permission-bypass flags. MAX still applies policy/verification.
+        argv = [binary, "-p", prompt, "--output-format", "stream-json"]
     elif vendor == "claude":
         argv = [
             binary,
@@ -301,7 +308,7 @@ def build_exec_argv(
 def probe_vendors(environ: dict[str, str] | None = None) -> list[Probe]:
     env = os.environ if environ is None else environ
     authorized = env.get(ALLOW_ENV) == "1"
-    return [_probe_one(name, authorized=authorized) for name in _VENDOR_ORDER]
+    return [_probe_one(name, authorized=authorized) for name in _PROBE_ORDER]
 
 
 class CliWorker(Worker):
@@ -347,6 +354,17 @@ class CliWorker(Worker):
             if not preflight.ok:
                 failure = "cli_auth_missing"
                 preflight_error = preflight.reason
+        if failure is None and vendor == "codebuddy":
+            # The worker uses an isolated HOME: it deliberately cannot borrow
+            # WorkBuddy's interactive login/session from the host machine.
+            has_api_key = bool(os.environ.get("CODEBUDDY_API_KEY", "").strip())
+            note("cli.auth_preflight", {"ok": "true" if has_api_key else "false", "has_api_key": str(has_api_key).lower()})
+            if not has_api_key:
+                failure = "cli_auth_missing"
+                preflight_error = (
+                    "CodeBuddy headless worker requires CODEBUDDY_API_KEY in the MAX worker "
+                    "process environment; an interactive WorkBuddy login is not inherited."
+                )
         if failure:
             if failure == "real_worker_required":
                 summary = "stub refused because a real CLI worker is required"
@@ -442,6 +460,8 @@ class CliWorker(Worker):
             extra_path_dirs=[str(Path(argv[0]).resolve().parent)] if vendor != "stub" else [],
             passthrough=passthrough,
         )
+        if vendor == "codebuddy":
+            env["CODEBUDDY_DISABLE_AUTOUPDATE"] = "1"
         note("cli.exec", {"vendor": vendor, "argc": str(len(argv))})
         ran = run_bounded(
             argv,
@@ -624,10 +644,13 @@ def _probe_one(vendor: str, *, authorized: bool) -> Probe:
     home = Path(tempfile.mkdtemp(prefix="max-agent-probe-home-"))
     tmp = Path(tempfile.mkdtemp(prefix="max-agent-probe-tmp-"))
     try:
+        probe_env = child_env(home=home, tmp=tmp, extra_path_dirs=[str(Path(found).resolve().parent)])
+        if vendor == "codebuddy":
+            probe_env["CODEBUDDY_DISABLE_AUTOUPDATE"] = "1"
         ran = run_bounded(
             [found, *_VENDOR_VERSION[vendor]],
             cwd=Path(tempfile.gettempdir()),
-            env=child_env(home=home, tmp=tmp, extra_path_dirs=[str(Path(found).resolve().parent)]),
+            env=probe_env,
             timeout_seconds=5,
             max_output_bytes=4_096,
             secrets=secret_values(os.environ),
