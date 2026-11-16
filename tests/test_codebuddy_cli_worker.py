@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from max_agent.db.models import AERExportRow
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
 from max_agent.models.enums import EventType, TaskStatus, WorkerKind
@@ -192,3 +193,9 @@ def test_codebuddy_fake_binary_finishes_real_worker_path_with_independent_pytest
     assert record["has_github_token"] is False
     assert record["has_max_db"] is False
     assert record["autoupdate_disabled"] is True
+    # MAX Journal creates an AER outbox record in the same task transaction.
+    # This proves export bookkeeping, not ingestion into the AER Runtime DB.
+    exports = session.query(AERExportRow).filter(AERExportRow.task_id == task.id).all()
+    assert exports
+    assert all(row.contract_version == "aer.v1" for row in exports)
+    assert any(row.kind == "verification" for row in exports)
