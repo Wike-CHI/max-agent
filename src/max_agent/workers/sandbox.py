@@ -45,6 +45,7 @@ _SENSITIVE_MARKERS = (
 _SENSITIVE_PREFIXES = ("AWS_", "GITHUB_", "OPENAI_", "ANTHROPIC_", "XAI_", "GROK_")
 ALLOWED_PASSTHROUGH = frozenset(
     {
+        "CODEBUDDY_API_KEY",
         "XAI_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
