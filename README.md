@@ -241,6 +241,7 @@ cd frontend && npm ci && npm test && npm run build && cd ..
 
 - `docs/env-survey.md` — Phase 0 environment findings
 - `docs/architecture.md` — architecture (bilingual notes)
+- `docs/integrations/workbuddy-aer-panorama.md` — MAX × WorkBuddy × AER 控制/执行/经验边界与 P0-P2 接入验收
 - `docs/limitations.md` — known limits + next phase
 - `docs/test-evidence.md` — captured pytest / demo output
 - `docs/console.md` — console 查询契约、分页、身份与限制
