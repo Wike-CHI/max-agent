@@ -1,0 +1,7 @@
+# Budget reservations (v0.6, Issue #77)
+
+`BudgetService` keeps a separate ledger for each original unit (`USD`, `credits`, etc.). A reservation commits the quoted upper bound against exactly one active Global, Provider and Task policy, in that lock order. There is no currency conversion and no inferred price from token counts. Missing or ambiguous policies deny a reservation. SQLite transactions use `BEGIN IMMEDIATE`; PostgreSQL locks policy rows with `FOR UPDATE`.
+
+The caller must create the attempt, then reserve in the **same transaction before dispatch**; the scheduler integration belongs to #78. One attempt and one idempotency key can have only one reservation. A measured cost entry from that attempt settles the hold to its actual amount. An unmeasured or mismatched unit, or an interrupted attempt, enters `reconcile_required` and retains the entire hold. A provider statement can then settle it with evidence. Only a provably uninvoked active attempt may be released; callers must supply the dispatch evidence. Overruns are durable and emit `budget_overrun`, so later reservations see the actual charge.
+
+The ledger currently has a kernel service and migration, not a public policy management API. This branch must remain Draft until #78 makes pre-dispatch reservation and post-execution reconciliation mandatory for paid execution. In particular, unconfigured legacy task execution does not use this new ledger yet. No real provider or CLI call is part of its tests.

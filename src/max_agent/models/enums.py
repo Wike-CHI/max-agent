@@ -73,6 +73,11 @@ class EventType(StrEnum):
     FENCING_REJECTED = "fencing_rejected"
     INTERRUPTED = "interrupted"
     BUDGET_EXCEEDED = "budget_exceeded"
+    BUDGET_RESERVED = "budget_reserved"
+    BUDGET_SETTLED = "budget_settled"
+    BUDGET_RECONCILIATION_REQUIRED = "budget_reconciliation_required"
+    BUDGET_RELEASED = "budget_released"
+    BUDGET_OVERRUN = "budget_overrun"
 
 
 class CostSource(StrEnum):
