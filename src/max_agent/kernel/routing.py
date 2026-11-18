@@ -4,13 +4,19 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import uuid
 
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from max_agent.db.models import BudgetHoldRow, BudgetPolicyRow, ModelProfileRow, ProviderAccountRow, TaskRow
-from max_agent.kernel.budget import _amount
+from max_agent.db.models import (
+    BudgetHoldRow, BudgetPolicyRow, ModelProfileRow, ProviderAccountRow,
+    RouteDecisionRow, TaskRow,
+)
+from max_agent.kernel.budget import BudgetService, _amount
 from max_agent.kernel.registry import RegistryService
+from max_agent.kernel.journal import Journal
+from max_agent.models.enums import EventType
 
 PROVIDER_VENDOR = {"openai": "codex", "anthropic": "claude", "xai": "grok"}
 
@@ -60,6 +66,11 @@ class RouteService:
         amount = _amount(policy.upper_bound)
         if policy.vendor_pin is not None and policy.vendor_pin not in PROVIDER_VENDOR.values():
             raise ValueError("unsupported vendor pin")
+        payload_pin = (task.worker_payload or {}).get("vendor")
+        if payload_pin not in (None, "auto", "stub", *PROVIDER_VENDOR.values()):
+            raise ValueError("unsupported task vendor")
+        if payload_pin == "stub":
+            raise ValueError("stub cannot execute a paid route")
         if any(not isinstance(label, str) or not label.strip() for label in policy.capabilities):
             raise ValueError("invalid capability")
         gates = worker_gates or {}
@@ -86,6 +97,8 @@ class RouteService:
                     reasons.append("effort_unsupported")
                 if policy.vendor_pin and vendor != policy.vendor_pin:
                     reasons.append("vendor_pin_mismatch")
+                if payload_pin not in (None, "auto") and vendor != payload_pin:
+                    reasons.append("task_vendor_pin_mismatch")
                 if vendor is None or not gates.get(vendor, False):
                     reasons.append("worker_gate_closed")
                 if vendor is None or not bindings.get(vendor, False):
@@ -109,6 +122,58 @@ class RouteService:
             task_id=task.id, unit=policy.unit, upper_bound=amount,
             candidates=candidates, selected=next((c for c in candidates if c.dispatchable), None),
         )
+
+    def bind_attempt(
+        self, *, task: TaskRow, attempt_id: str, fencing_token: int,
+        policy: RoutePolicy, selected: RouteCandidate, at: datetime,
+    ) -> RouteDecisionRow:
+        """Called inside the claim transaction, after attempt insertion and before dispatch."""
+        if not selected.dispatchable or not selected.vendor or not selected.price_version_id:
+            raise ValueError("selected route is not dispatchable")
+        account = self.session.query(ProviderAccountRow).filter_by(id=selected.account_id).with_for_update().one_or_none()
+        model = self.session.query(ModelProfileRow).filter_by(id=selected.model_id).with_for_update().one_or_none()
+        if (
+            account is None or model is None or account.owner != task.created_by
+            or not account.enabled or not model.enabled or account.provider_key != model.provider_key
+            or selected.vendor != PROVIDER_VENDOR.get(account.provider_key)
+            or model.model_key != selected.model
+            or not set(policy.capabilities).issubset(set(model.capabilities or []))
+            or (policy.effort is not None and policy.effort not in (model.supported_efforts or []))
+        ):
+            raise ValueError("route account, model or capability changed during claim")
+        price = RegistryService(self.session).price_at(
+            owner=task.created_by, account_id=account.id, model_id=model.id, at=at,
+        )
+        if (
+            price is None or price.id != selected.price_version_id
+            or price.currency != policy.unit or not price.source.startswith("https://")
+        ):
+            raise ValueError("route price changed during claim")
+        reservation = BudgetService(self.session).reserve(
+            owner=task.created_by, account_id=selected.account_id, task_id=task.id,
+            attempt_id=attempt_id, fencing_token=fencing_token, unit=policy.unit,
+            upper_bound=policy.upper_bound, idempotency_key=f"route:{attempt_id}", now=at,
+        )
+        row = RouteDecisionRow(
+            id=str(uuid.uuid4()), task_id=task.id, attempt_id=attempt_id,
+            fencing_token=fencing_token, reservation_id=reservation.id,
+            account_id=selected.account_id, model_id=selected.model_id,
+            price_version_id=selected.price_version_id, policy_version="route.v1",
+            vendor=selected.vendor, model_key=selected.model, effort=policy.effort,
+            unit=policy.unit, upper_bound=_amount(policy.upper_bound),
+            policy_snapshot=policy.model_dump(mode="json"),
+            reason_codes=["selected"],
+        )
+        self.session.add(row)
+        self.session.flush()
+        Journal(self.session).append(task.id, EventType.ROUTE_SELECTED, "route selected and reserved", {
+            "decision_id": row.id, "reservation_id": reservation.id,
+            "attempt_id": attempt_id, "fencing_token": fencing_token,
+            "model_id": model.id, "account_id": account.id,
+            "price_version_id": price.id, "policy_version": row.policy_version,
+            "unit": row.unit, "upper_bound": str(row.upper_bound),
+        })
+        return row
 
     def _budget_available(
         self, task: TaskRow, account: ProviderAccountRow, unit: str,

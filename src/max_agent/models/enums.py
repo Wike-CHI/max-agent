@@ -79,6 +79,7 @@ class EventType(StrEnum):
     BUDGET_RELEASED = "budget_released"
     BUDGET_OVERRUN = "budget_overrun"
     ROUTE_REJECTED = "route_rejected"
+    ROUTE_SELECTED = "route_selected"
 
 
 class CostSource(StrEnum):

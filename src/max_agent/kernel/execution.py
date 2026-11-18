@@ -8,7 +8,10 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
+from max_agent.db.models import (
+    CostEntryRow, ProviderAccountRow, RouteDecisionRow, TaskAttemptRow, TaskRow, utcnow,
+)
+from max_agent.kernel.budget import BudgetService
 from max_agent.kernel.dag import wake_satisfied
 from max_agent.kernel.economics import assess_budget
 from max_agent.kernel.errors import IrreversibleOpError, StaleFenceError
@@ -197,7 +200,26 @@ def finalize_in_session(
     if attempt_row is None or attempt_row.fencing_token != claim.fencing_token:
         raise StaleFenceError(f"attempt {claim.attempt_id} does not match fence {claim.fencing_token}")
     raw_usage = result.usage if result.usage is not None else result.outputs.get("usage")
-    record_attempt_usage(session, attempt_row, raw=raw_usage, reading=reading)
+    usage_record = record_attempt_usage(session, attempt_row, raw=raw_usage, reading=reading)
+    decision = session.query(RouteDecisionRow).filter_by(attempt_id=claim.attempt_id).one_or_none()
+    route_identity_ok = True
+    if decision is not None:
+        account = session.get(ProviderAccountRow, decision.account_id)
+        route_identity_ok = (
+            result.outputs.get("real_cli_invoked") is True
+            and stamp["model"] == decision.model_key
+            and account is not None and stamp["provider"] == account.provider_key
+        )
+        entry = session.query(CostEntryRow).filter_by(usage_record_id=usage_record.id).one_or_none()
+        budget = BudgetService(session)
+        if route_identity_ok and entry is not None and entry.confidence == "measured" and entry.unit == decision.unit:
+            entry.price_version_id = decision.price_version_id
+            budget.settle_from_entry(decision.reservation_id, cost_entry_id=entry.id)
+        else:
+            budget.require_reconciliation(
+                decision.reservation_id,
+                reason="route identity unverified or measured cost missing",
+            )
     journal.append(
         claim.task_id,
         EventType.WORKER_OUTPUT,
@@ -252,6 +274,13 @@ def finalize_in_session(
 
     row = transition_task(session, row, TaskStatus.VERIFYING, "verifying acceptance criteria", journal=journal)
     verdict = verify(list(row.acceptance_criteria or []), result, payload=dict(row.worker_payload or {}))
+    if decision is not None and not route_identity_ok and verdict.passed:
+        verdict = verdict.model_copy(update={
+            "passed": False,
+            "message": "selected route was not verified by worker output",
+            "checks": [*verdict.checks, {"criterion": "route_identity", "passed": False,
+                                         "detail": "model/provider or real CLI invocation was not verified"}],
+        })
     if (
         verdict.passed
         and require_real_worker(claim.payload)

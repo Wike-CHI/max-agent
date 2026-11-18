@@ -10,7 +10,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from max_agent.db.models import AERExportRow, TaskAttemptRow, TaskEventRow, TaskRow
+from max_agent.db.models import (
+    AERExportRow, BudgetReservationRow, RouteDecisionRow,
+    TaskAttemptRow, TaskEventRow, TaskRow,
+)
 from max_agent.models.aer import (
     AER_CONTRACT_VERSION,
     COST_SOURCES,
@@ -243,8 +246,32 @@ def build_trace(session: Session, row: TaskRow) -> TaskTrace:
         )
     ]
     if attempts:
+        route_by_attempt = {
+            decision.attempt_id: decision
+            for decision in session.query(RouteDecisionRow).filter_by(task_id=row.id).all()
+        }
         for attempt in attempts:
             reading = _reading(attempt)
+            route = route_by_attempt.get(attempt.id)
+            if route is not None:
+                reservation = session.get(BudgetReservationRow, route.reservation_id)
+                chain.append(EvidenceLink(
+                    kind="route", ref=route.id, marker="recorded", attempt_no=attempt.attempt_no,
+                    detail={
+                        "policy_version": route.policy_version,
+                        "fencing_token": route.fencing_token,
+                        "account_id": route.account_id,
+                        "model_id": route.model_id,
+                        "model": route.model_key,
+                        "vendor": route.vendor,
+                        "effort": route.effort,
+                        "price_version_id": route.price_version_id,
+                        "unit": route.unit,
+                        "upper_bound": str(route.upper_bound),
+                        "reservation_id": route.reservation_id,
+                        "reservation_state": reservation.state if reservation else "missing",
+                    },
+                ))
             chain.append(
                 EvidenceLink(
                     kind="worker",
