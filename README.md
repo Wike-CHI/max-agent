@@ -145,6 +145,9 @@ curl -H "Authorization: Bearer $MAX_AGENT_API_TOKEN" http://127.0.0.1:8080/v1/ta
 # GET  /v1/tasks/{id}/events
 # GET  /v1/tasks/{id}/trace       # issue -> worker -> verification -> pull request
 # GET  /v1/metrics                # authenticated economics report
+# GET  /v1/providers              # authenticated, owner-scoped billing account metadata
+# GET  /v1/models                 # authenticated model capability registry
+# GET  /v1/models/{id}/prices/current?account_id=... # owner-scoped effective price
 # POST /v1/aer/retry              # authenticated; does not run tasks
 # POST /v1/inbound/webhook        # signed Routine/webhook create; returns task_id
 ```

@@ -169,12 +169,73 @@ class CostEntryRow(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     usage_record_id: Mapped[str] = mapped_column(String(36), ForeignKey("usage_records.id"), nullable=False)
+    price_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("price_versions.id", name="fk_cost_entries_price_version"), nullable=True
+    )
     amount: Mapped[Decimal] = mapped_column(ExactDecimal(), nullable=False)
     unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
     confidence: Mapped[str] = mapped_column(String(16), nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     billing_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class ProviderAccountRow(Base):
+    """One owner's billing account; credential_ref never contains a token."""
+
+    __tablename__ = "provider_accounts"
+    __table_args__ = (
+        UniqueConstraint("owner", "account_key", name="uq_provider_accounts_owner_key"),
+        Index("ix_provider_accounts_owner_provider", "owner", "provider_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    account_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    billing_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    credential_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class ModelProfileRow(Base):
+    """Provider model capabilities; performance scores are observed elsewhere."""
+
+    __tablename__ = "model_profiles"
+    __table_args__ = (UniqueConstraint("provider_key", "model_key", name="uq_model_profiles_provider_model"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    capabilities: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    supported_efforts: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class PriceVersionRow(Base):
+    """Append-only price; latest effective_from wins until the next version."""
+
+    __tablename__ = "price_versions"
+    __table_args__ = (
+        UniqueConstraint("account_id", "model_id", "effective_from", name="uq_price_versions_scope_start"),
+        Index("ix_price_versions_scope_start", "account_id", "model_id", "effective_from"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(String(36), ForeignKey("provider_accounts.id"), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(36), ForeignKey("model_profiles.id"), nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    pricing_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    currency: Mapped[str] = mapped_column(String(16), nullable=False)
+    input_rate: Mapped[Decimal | None] = mapped_column(ExactDecimal(), nullable=True)
+    output_rate: Mapped[Decimal | None] = mapped_column(ExactDecimal(), nullable=True)
+    cached_input_rate: Mapped[Decimal | None] = mapped_column(ExactDecimal(), nullable=True)
+    compute_rate: Mapped[Decimal | None] = mapped_column(ExactDecimal(), nullable=True)
+    source: Mapped[str] = mapped_column(String(256), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
 class AERExportRow(Base):
