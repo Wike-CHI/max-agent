@@ -522,7 +522,8 @@ def claim_in_session(
         acceptance_criteria=tuple(row.acceptance_criteria or []),
         payload=(
             {**dict(row.worker_payload or {}), "vendor": selected_route.vendor,
-             "model": selected_route.model, "require_real_worker": True}
+             "model": selected_route.model, "bound_model": selected_route.model,
+             "require_real_worker": True}
             if selected_route is not None else dict(row.worker_payload or {})
         ),
         timeout_seconds=int(row.timeout_seconds),

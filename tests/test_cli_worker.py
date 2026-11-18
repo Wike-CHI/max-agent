@@ -171,6 +171,26 @@ def test_exec_argv_keeps_prompt_as_one_argument_and_refuses_yolo() -> None:
     assert "--allow-dangerously-skip-permissions" in FORBIDDEN_CLI_FLAGS
 
 
+def test_bound_model_is_one_validated_argv_value() -> None:
+    workspace = Path("/tmp/max-agent-workspaces/demo/work")
+    kwargs = {"binary": "/usr/bin/codex", "workspace": workspace, "prompt": "do work",
+              "prompt_file": workspace / "prompt.txt", "bound_model": "gpt-6.2-sol"}
+    codex = build_exec_argv("codex", **kwargs)
+    assert codex[codex.index("--model") + 1] == "gpt-6.2-sol"
+    kwargs["binary"] = "/usr/bin/claude"
+    kwargs["bound_model"] = "claude-sonnet-4-6"
+    claude = build_exec_argv("claude", **kwargs)
+    assert claude[claude.index("--model") + 1] == "claude-sonnet-4-6"
+    import pytest
+
+    kwargs["bound_model"] = "model;rm -rf /"
+    with pytest.raises(ValueError, match="unsupported bound model"):
+        build_exec_argv("claude", **kwargs)
+    kwargs["bound_model"] = "safe-model"
+    with pytest.raises(ValueError, match="unsupported bound model"):
+        build_exec_argv("grok", **kwargs)
+
+
 def test_choose_vendor_authorization_and_auto_preference() -> None:
     probes = [
         Probe(vendor="grok", available=True, enabled=False, reason="not_authorized"),

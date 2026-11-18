@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -115,6 +116,7 @@ _NON_RECOVERABLE = frozenset(
         "cli_unavailable",
         "path_violation",
         "real_worker_required",
+        "model_binding_unavailable",
         "worktree_failed",
         *_DOCUMENT_FAILURES,
     }
@@ -236,9 +238,15 @@ def build_exec_argv(
     prompt_file: Path,
     tools: Sequence[str] | None = None,
     disallowed_tools: Sequence[str] | None = None,
+    bound_model: str | None = None,
 ) -> list[str]:
     """Argv for one headless coding CLI. The prompt is a single argument."""
     del prompt_file  # real CLIs receive the prompt as one argv element
+    if bound_model is not None and (
+        len(bound_model) > 128 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", bound_model) is None
+        or vendor not in {"codex", "claude"}
+    ):
+        raise ValueError("unsupported bound model or vendor")
     if vendor == "grok":
         argv = [
             binary,
@@ -276,6 +284,8 @@ def build_exec_argv(
             str(workspace / ".max-agent" / "cli-last-message.txt"),
             prompt,
         ]
+        if bound_model is not None:
+            argv[2:2] = ["--model", bound_model]
     elif vendor == "claude":
         argv = [
             binary,
@@ -284,6 +294,8 @@ def build_exec_argv(
             "--output-format",
             "json",
         ]
+        if bound_model is not None:
+            argv.extend(["--model", bound_model])
         if tools:
             argv.extend(["--tools", ",".join(tools)])
         if disallowed_tools:
@@ -328,6 +340,12 @@ class CliWorker(Worker):
         note("cli.probe", {"vendor": vendor, "authorized": authorized, "failure": failure or ""})
         if failure is None and required and vendor == "stub":
             failure = "real_worker_required"
+        bound_model = payload.get("bound_model")
+        if failure is None and bound_model is not None and (
+            not isinstance(bound_model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", bound_model)
+            or vendor not in {"codex", "claude"}
+        ):
+            failure = "model_binding_unavailable"
         preflight_error = None
         if failure is None and vendor == "claude":
             preflight = claude_spawn_auth_preflight()
@@ -431,6 +449,7 @@ class CliWorker(Worker):
                 disallowed_tools=_string_list(
                     payload.get("claude_disallowed_tools") or payload.get("disallowed_tools")
                 ),
+                bound_model=bound_model,
             )
             passthrough = _passthrough(vendor)
             real = True
