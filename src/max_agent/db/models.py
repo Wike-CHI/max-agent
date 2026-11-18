@@ -238,6 +238,65 @@ class PriceVersionRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
+class BudgetPolicyRow(Base):
+    """One owner/scope/unit/period ceiling; reservations lock these rows."""
+
+    __tablename__ = "budget_policies"
+    __table_args__ = (
+        UniqueConstraint("owner", "scope", "scope_id", "unit", "period_start", name="uq_budget_policy_scope_start"),
+        Index("ix_budget_policy_lookup", "owner", "scope", "scope_id", "unit"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ceiling: Mapped[Decimal] = mapped_column(ExactDecimal(), nullable=False)
+    warning_at: Mapped[Decimal | None] = mapped_column(ExactDecimal(), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class BudgetReservationRow(Base):
+    """One attempt's bounded claim, retained through unknown-cost recovery."""
+
+    __tablename__ = "budget_reservations"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", name="uq_budget_reservations_attempt"),
+        UniqueConstraint("idempotency_key", name="uq_budget_reservations_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(36), ForeignKey("provider_accounts.id"), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=False)
+    attempt_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_attempts.id"), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    reserved: Mapped[Decimal] = mapped_column(ExactDecimal(), nullable=False)
+    actual: Mapped[Decimal | None] = mapped_column(ExactDecimal(), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    evidence_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class BudgetHoldRow(Base):
+    """Policy-specific commitment; no cross-currency total is computed."""
+
+    __tablename__ = "budget_holds"
+    __table_args__ = (UniqueConstraint("reservation_id", "policy_id", name="uq_budget_holds_reservation_policy"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    reservation_id: Mapped[str] = mapped_column(String(36), ForeignKey("budget_reservations.id"), nullable=False)
+    policy_id: Mapped[str] = mapped_column(String(36), ForeignKey("budget_policies.id"), nullable=False)
+    committed: Mapped[Decimal] = mapped_column(ExactDecimal(), nullable=False)
+
+
 class AERExportRow(Base):
     """Outbox for one journal event. Delivery failure stays on this row."""
 
