@@ -395,6 +395,31 @@ def claim_in_session(
         journal.append(task_id, EventType.BUDGET_EXCEEDED, reason, assessment.payload())
         return task_to_read(row)
 
+    raw_route = (row.worker_payload or {}).get("route")
+    if raw_route is not None:
+        from max_agent.kernel.routing import RoutePolicy, RouteService
+
+        try:
+            policy = RoutePolicy.model_validate(raw_route)
+            preview = RouteService(session).preview(task=row, policy=policy, at=now)
+        except ValueError:
+            preview = None
+        if preview is None or preview.selected is None:
+            # No model-binding adapter yet. A route-opted task must never
+            # silently fall through to the legacy, unreserved worker path.
+            codes = ({"invalid_route_policy"} if preview is None else {
+                code for candidate in preview.candidates for code in candidate.reason_codes
+            } or {"no_candidates"})
+            reason = "no dispatchable route: " + ", ".join(sorted(codes))
+            if not cas_update(session, row, {"last_error": reason[:2000]}):
+                raise LeaseHeldError(f"concurrent update on task {task_id}")
+            journal.append(task_id, EventType.ROUTE_REJECTED, reason[:2000], {
+                "candidate_count": len(preview.candidates) if preview else 0,
+                "unit": preview.unit if preview else None,
+            })
+            return task_to_read(row)
+        raise RuntimeError("route dispatch requires atomic reservation and model binding")
+
     if active_inflight_count(session, now) >= max(1, int(max_concurrency)):
         if recovered_now:
             return task_to_read(row)

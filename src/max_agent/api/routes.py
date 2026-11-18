@@ -17,6 +17,7 @@ from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
 from max_agent.kernel.query import TaskQuery
 from max_agent.kernel.registry import RegistryService
+from max_agent.kernel.routing import RoutePolicy, RoutePreview, RouteService
 from max_agent.models.aer import EconomicsReport, ExportRetryResult, TaskTrace
 from max_agent.models.registry import ModelProfileRead, PriceVersionRead, ProviderAccountRead
 from max_agent.models.enums import TaskStatus
@@ -32,8 +33,31 @@ from max_agent.models.schemas import (
     TaskPage,
     TaskEventPage,
 )
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/v1")
+
+
+class RoutePreviewRequest(BaseModel):
+    task_id: str
+
+
+@router.post("/routes/preview", response_model=RoutePreview)
+def preview_route(body: RoutePreviewRequest, principal: str = Depends(require_principal)) -> RoutePreview:
+    try:
+        with session_scope() as session:
+            task = authorize_task(session, body.task_id, principal)
+            raw_policy = (task.worker_payload or {}).get("route")
+            if raw_policy is None:
+                raise ValueError("task has no route policy")
+            policy = RoutePolicy.model_validate(raw_policy)
+            # No adapter currently binds a selected model to the actual CLI
+            # invocation. Report candidates, but never offer paid dispatch.
+            return RouteService(session).preview(task=task, policy=policy, at=datetime.now(timezone.utc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/health")
