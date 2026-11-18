@@ -107,6 +107,12 @@ Worker 报告 `usage.source`（`grok_bot_quota` / `cli_quota` / `api_spend`）�
 
 迁移：先在已有库执行 `uv run alembic upgrade head`；`init-db` 的 `create_all` 不会迁移已有库。此版本只新增两表，不回填或改写历史 attempt。回滚到 `f19a0c3d8e21` 会删除两张新表及其中数据，但保留旧 attempt 成本列、任务与 Journal；回滚前应备份数据库。新表建立后才运行新代码，避免新代码写入未迁移数据库。
 
+### v0.6 模型与账户注册表（Issue #76）
+
+`provider_accounts` 按 owner 区分同一家 Provider 的 API、订阅、预付和本地账户；只允许 `env:` / `vault:` / `secret:` 凭据引用，不保存密钥值。`model_profiles` 保存能力、effort 与启用状态；`price_versions` 对账户+模型追加生效时间递增的价格版本，前一版的隐含结束时间为下一版开始时间。价格率 SQLite 使用十进制文本、Postgres 使用 NUMERIC(36,18)；`cost_entries.price_version_id` 可空，旧用量和没有可信价格的记录不得回填虚构快照。注册表默认空且新账户/模型默认禁用，只有经过认证、按账户 owner 限制的查询 API，没有远端配置或凭据写接口。价格是来源明确的配置数据，尚未参与真实路由或预算结算。
+
+迁移 `b76a3e4f1290` 是增量的。回滚到 `a40b9c612e74` 会丢弃注册表与版本价格，并删除成本条目的可空价格关联；不会删除 #74 的用量记录或旧 attempt。回滚前备份数据库。
+
 ## Grok 入口
 
 Grok Bot 只做一次性调用：`create` 立刻返回 `task_id`，之后按需 `status` / `events`。Worker 的 `run` 是单独进程，不由对话循环轮询。稳定字段见 `max_agent.entry.contract.envelope`。Skill 说明在 `docs/skills/grok-max-entry/SKILL.md`。stdio MCP 只实现 `initialize`、`tools/list`、`tools/call`。

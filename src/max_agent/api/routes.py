@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
@@ -15,7 +16,9 @@ from max_agent.entry.webhook import WebhookError, accept_inbound, verify_signatu
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
 from max_agent.kernel.query import TaskQuery
+from max_agent.kernel.registry import RegistryService
 from max_agent.models.aer import EconomicsReport, ExportRetryResult, TaskTrace
+from max_agent.models.registry import ModelProfileRead, PriceVersionRead, ProviderAccountRead
 from max_agent.models.enums import TaskStatus
 from max_agent.models.schemas import (
     ApproveRequest,
@@ -51,6 +54,44 @@ def ready() -> dict[str, str]:
 def telemetry(principal: str = Depends(require_principal)) -> dict:
     """In-process counters and recent spans. Not the economics report at /metrics."""
     return get_telemetry().snapshot()
+
+
+@router.get("/providers", response_model=list[ProviderAccountRead])
+def list_provider_accounts(principal: str = Depends(require_principal)) -> list[ProviderAccountRead]:
+    with session_scope() as session:
+        return [ProviderAccountRead.model_validate(row) for row in RegistryService(session).accounts(principal)]
+
+
+@router.get("/models", response_model=list[ModelProfileRead])
+def list_model_profiles(
+    provider: str | None = Query(default=None, max_length=64),
+    principal: str = Depends(require_principal),
+) -> list[ModelProfileRead]:
+    try:
+        with session_scope() as session:
+            return [ModelProfileRead.model_validate(row) for row in RegistryService(session).models(provider)]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/models/{model_id}/prices/current", response_model=PriceVersionRead | None)
+def current_model_price(
+    model_id: str,
+    account_id: str = Query(..., max_length=36),
+    at: datetime | None = None,
+    principal: str = Depends(require_principal),
+) -> PriceVersionRead | None:
+    try:
+        with session_scope() as session:
+            row = RegistryService(session).price_at(
+                owner=principal, account_id=account_id, model_id=model_id,
+                at=at or datetime.now(timezone.utc),
+            )
+            return PriceVersionRead.model_validate(row) if row is not None else None
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/tasks", response_model=TaskRead)

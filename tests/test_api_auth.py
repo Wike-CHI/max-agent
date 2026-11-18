@@ -54,6 +54,8 @@ def _create(client: TestClient, *, key: str = "auth-task", tags: list[str] | Non
         ("post", "/v1/queue/run", None),
         ("get", "/v1/telemetry", None),
         ("get", "/v1/metrics", None),
+        ("get", "/v1/providers", None),
+        ("get", "/v1/models", None),
         ("post", "/v1/aer/retry", None),
     ],
 )
