@@ -97,6 +97,8 @@ class RouteService:
                 expected_env = ROUTED_CREDENTIAL_ENV.get(vendor or "")
                 if expected_env is None or account.credential_ref != f"env:{expected_env}":
                     reasons.append("credential_binding_missing")
+                elif self._credential_ref_count(task.created_by, account.credential_ref) != 1:
+                    reasons.append("credential_binding_ambiguous")
                 if not model.enabled:
                     reasons.append("model_disabled")
                 if not set(policy.capabilities).issubset(set(model.capabilities or [])):
@@ -153,6 +155,8 @@ class RouteService:
             or (policy.effort is not None and policy.effort not in (model.supported_efforts or []))
         ):
             raise ValueError("route account, model or capability changed during claim")
+        if self._credential_ref_count(task.created_by, account.credential_ref) != 1:
+            raise ValueError("route credential reference is ambiguous")
         price = RegistryService(self.session).price_at(
             owner=task.created_by, account_id=account.id, model_id=model.id, at=at,
         )
@@ -204,6 +208,11 @@ class RouteService:
             if committed + amount > active[0].ceiling:
                 return False
         return True
+
+    def _credential_ref_count(self, owner: str, credential_ref: str) -> int:
+        return self.session.query(ProviderAccountRow).filter_by(
+            owner=owner, credential_ref=credential_ref, enabled=True
+        ).count()
 
 
 def _utc(value: datetime) -> datetime:

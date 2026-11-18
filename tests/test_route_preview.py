@@ -109,6 +109,29 @@ def test_price_and_budget_do_not_override_wrong_credential_binding(db_url: str) 
         assert not candidate.dispatchable
 
 
+def test_shared_api_key_reference_cannot_choose_one_account(db_url: str) -> None:
+    at = datetime.now(timezone.utc)
+    with session_scope(db_url) as session:
+        registry = RegistryService(session)
+        for key in ("first", "second"):
+            registry.register_account(owner="user", account_key=key, provider_key="openai",
+                                      billing_mode="api_metered", credential_ref="env:OPENAI_API_KEY",
+                                      enabled=True)
+        registry.register_model(provider_key="openai", model_key="model-a", capabilities=["code"], enabled=True)
+        task_id = TaskService(session).create(TaskCreate(goal="ambiguous account", worker_payload={
+            "route": {"unit": "USD", "upper_bound": "1"}
+        })).id
+        task = session.get(TaskRow, task_id)
+        preview = RouteService(session).preview(
+            task=task, policy=RoutePolicy(unit="USD", upper_bound=1), at=at,
+            worker_gates={"codex": True}, model_binding_gates={"codex": True},
+            spend_cap_gates={"codex": True},
+        )
+        assert preview.selected is None
+        assert len(preview.candidates) == 2
+        assert all("credential_binding_ambiguous" in c.reason_codes for c in preview.candidates)
+
+
 def test_route_opted_task_cannot_fall_through_to_legacy_dispatch(db_url: str) -> None:
     with session_scope(db_url) as session:
         task_id = TaskService(session).create(TaskCreate(goal="paid route", worker_payload={
