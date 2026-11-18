@@ -17,7 +17,9 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
+from max_agent.db.models import RouteDecisionRow, TaskAttemptRow, TaskRow, utcnow
+from max_agent.kernel.budget import BudgetService
+from max_agent.models.route_contract import ROUTED_CREDENTIAL_ENV
 from max_agent.kernel.economics import assess_budget
 from max_agent.kernel.errors import ConcurrencyLimitError, LeaseHeldError
 from max_agent.kernel.journal import Journal
@@ -240,6 +242,10 @@ def recover_inflight(
         failure_class=FailureClass.CRASH,
         status=AttemptStatus.INTERRUPTED,
     )
+    for decision in session.query(RouteDecisionRow).filter_by(task_id=row.id, fencing_token=old_token).all():
+        BudgetService(session).require_reconciliation(
+            decision.reservation_id, reason="lease expired; provider charge is unknown",
+        )
     journal = Journal(session)
     journal.append(
         row.id,
@@ -307,6 +313,8 @@ def claim_in_session(
     backoff_base_seconds: float,
     backoff_cap_seconds: float,
     max_concurrency: int = 1,
+    route_worker_gates: dict[str, bool] | None = None,
+    route_model_gates: dict[str, bool] | None = None,
 ) -> AttemptClaim | TaskRead:
     """Commit-ready claim. Caller must commit before worker.run()."""
     from max_agent.kernel.dag import deps_satisfied
@@ -395,6 +403,40 @@ def claim_in_session(
         journal.append(task_id, EventType.BUDGET_EXCEEDED, reason, assessment.payload())
         return task_to_read(row)
 
+    raw_route = (row.worker_payload or {}).get("route")
+    selected_route = None
+    route_policy = None
+    if raw_route is not None:
+        from max_agent.kernel.routing import RoutePolicy, RouteService
+
+        try:
+            policy = RoutePolicy.model_validate(raw_route)
+            preview = RouteService(session).preview(
+                task=row, policy=policy, at=now,
+                worker_gates=route_worker_gates, model_binding_gates=route_model_gates,
+            )
+        except ValueError:
+            preview = None
+        if preview is None or preview.selected is None or row.worker_kind != "cli" or (
+            req.worker_kind is not None and req.worker_kind.value != "cli"
+        ):
+            # No model-binding adapter yet. A route-opted task must never
+            # silently fall through to the legacy, unreserved worker path.
+            codes = ({"invalid_route_policy"} if preview is None else {
+                code for candidate in preview.candidates for code in candidate.reason_codes
+            } or {"no_candidates"})
+            if row.worker_kind != "cli" or (req.worker_kind is not None and req.worker_kind.value != "cli"):
+                codes.add("cli_worker_required")
+            reason = "no dispatchable route: " + ", ".join(sorted(codes))
+            if not cas_update(session, row, {"last_error": reason[:2000]}):
+                raise LeaseHeldError(f"concurrent update on task {task_id}")
+            journal.append(task_id, EventType.ROUTE_REJECTED, reason[:2000], {
+                "candidate_count": len(preview.candidates) if preview else 0,
+                "unit": preview.unit if preview else None,
+            })
+            return task_to_read(row)
+        selected_route, route_policy = preview.selected, policy
+
     if active_inflight_count(session, now) >= max(1, int(max_concurrency)):
         if recovered_now:
             return task_to_read(row)
@@ -450,6 +492,13 @@ def claim_in_session(
     )
     session.add(attempt)
     session.flush()
+    if selected_route is not None and route_policy is not None:
+        from max_agent.kernel.routing import RouteService
+
+        RouteService(session).bind_attempt(
+            task=row, attempt_id=attempt_id, fencing_token=new_fence,
+            policy=route_policy, selected=selected_route, at=now,
+        )
     journal.append(
         task_id,
         EventType.LEASED,
@@ -472,7 +521,13 @@ def claim_in_session(
         lease_expires_at=expires,
         goal=row.goal,
         acceptance_criteria=tuple(row.acceptance_criteria or []),
-        payload=dict(row.worker_payload or {}),
+        payload=(
+            {**dict(row.worker_payload or {}), "vendor": selected_route.vendor,
+             "model": selected_route.model, "bound_model": selected_route.model,
+             "credential_env": ROUTED_CREDENTIAL_ENV[selected_route.vendor],
+             "require_real_worker": True}
+            if selected_route is not None else dict(row.worker_payload or {})
+        ),
         timeout_seconds=int(row.timeout_seconds),
         worker_kind=kind,
         has_side_effects=bool(row.has_side_effects),

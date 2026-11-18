@@ -297,6 +297,31 @@ class BudgetHoldRow(Base):
     committed: Mapped[Decimal] = mapped_column(ExactDecimal(), nullable=False)
 
 
+class RouteDecisionRow(Base):
+    """One policy snapshot bound to the attempt and its budget reservation."""
+
+    __tablename__ = "route_decisions"
+    __table_args__ = (UniqueConstraint("attempt_id", name="uq_route_decisions_attempt"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=False)
+    attempt_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_attempts.id"), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    reservation_id: Mapped[str] = mapped_column(String(36), ForeignKey("budget_reservations.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(36), ForeignKey("provider_accounts.id"), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(36), ForeignKey("model_profiles.id"), nullable=False)
+    price_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("price_versions.id"), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    vendor: Mapped[str] = mapped_column(String(16), nullable=False)
+    model_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    effort: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    upper_bound: Mapped[Decimal] = mapped_column(ExactDecimal(), nullable=False)
+    policy_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
 class AERExportRow(Base):
     """Outbox for one journal event. Delivery failure stays on this row."""
 

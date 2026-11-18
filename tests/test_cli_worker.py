@@ -26,6 +26,7 @@ from max_agent.workers.cli_adapter import (
     REQUIRE_REAL_ENV,
     Probe,
     _passthrough,
+    _routed_passthrough,
     build_exec_argv,
     choose_vendor,
     claude_spawn_auth_preflight,
@@ -169,6 +170,69 @@ def test_exec_argv_keeps_prompt_as_one_argument_and_refuses_yolo() -> None:
     assert "--yolo" not in grok
     assert "danger-full-access" not in codex
     assert "--allow-dangerously-skip-permissions" in FORBIDDEN_CLI_FLAGS
+
+
+def test_bound_model_is_one_validated_argv_value() -> None:
+    workspace = Path("/tmp/max-agent-workspaces/demo/work")
+    kwargs = {"binary": "/usr/bin/codex", "workspace": workspace, "prompt": "do work",
+              "prompt_file": workspace / "prompt.txt", "bound_model": "gpt-6.2-sol"}
+    codex = build_exec_argv("codex", **kwargs)
+    assert codex[codex.index("--model") + 1] == "gpt-6.2-sol"
+    kwargs["binary"] = "/usr/bin/claude"
+    kwargs["bound_model"] = "claude-sonnet-4-6"
+    claude = build_exec_argv("claude", **kwargs)
+    assert claude[claude.index("--model") + 1] == "claude-sonnet-4-6"
+    import pytest
+
+    kwargs["bound_model"] = "model;rm -rf /"
+    with pytest.raises(ValueError, match="unsupported bound model"):
+        build_exec_argv("claude", **kwargs)
+    kwargs["bound_model"] = "safe-model"
+    with pytest.raises(ValueError, match="unsupported bound model"):
+        build_exec_argv("grok", **kwargs)
+
+
+def test_routed_child_receives_only_the_bound_api_credential(tmp_path: Path) -> None:
+    host = {
+        "OPENAI_API_KEY": "sk-test-account-key-12345",
+        "OPENAI_BASE_URL": "https://untrusted.example",
+        "ANTHROPIC_API_KEY": "sk-ant-other-account-12345",
+        "ANTHROPIC_AUTH_TOKEN": "other-auth-token",
+        "ANTHROPIC_MODEL": "other-model",
+    }
+    scoped = _routed_passthrough("codex", "OPENAI_API_KEY", host)
+    assert scoped == {"OPENAI_API_KEY": host["OPENAI_API_KEY"]}
+    child = child_env(home=tmp_path / "home", tmp=tmp_path / "tmp", passthrough=scoped)
+    assert child["OPENAI_API_KEY"] == host["OPENAI_API_KEY"]
+    assert all(key not in child for key in host if key != "OPENAI_API_KEY")
+    assert _routed_passthrough("claude", "ANTHROPIC_API_KEY", host) == {
+        "ANTHROPIC_API_KEY": host["ANTHROPIC_API_KEY"]
+    }
+    with pytest.raises(ValueError, match="unavailable"):
+        _routed_passthrough("codex", "ANTHROPIC_API_KEY", host)
+    with pytest.raises(ValueError, match="unavailable"):
+        _routed_passthrough("codex", "OPENAI_API_KEY", {})
+
+
+def test_routed_cli_fails_before_worktree_when_account_key_missing(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import max_agent.workers.cli_adapter as cli_adapter
+
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(cli_adapter, "probe_vendors", lambda: [
+        Probe(vendor="codex", available=True, enabled=True, reason="ok", binary="/usr/bin/codex")
+    ])
+    workspace = tmp_path / "not-created"
+    _created, out = _run(session, "bound key missing", {
+        "vendor": "codex", "bound_model": "gpt-6.2-sol",
+        "credential_env": "OPENAI_API_KEY", "require_real_worker": True,
+        "workspace_root": str(workspace),
+    })
+    assert out.status == TaskStatus.FAILED
+    assert _outputs(session, out.id)["adapter_failure"] == "credential_binding_missing"
+    assert not workspace.exists()
 
 
 def test_choose_vendor_authorization_and_auto_preference() -> None:
