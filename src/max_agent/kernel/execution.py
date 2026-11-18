@@ -19,6 +19,7 @@ from max_agent.kernel.queue import QueuePolicy, pick_next
 from max_agent.kernel.readmodel import task_to_read
 from max_agent.kernel.retry import backoff_delay_seconds
 from max_agent.kernel.timeutil import as_utc
+from max_agent.kernel.usage import record_attempt_usage
 from max_agent.policy.boundary import irreversible_refusal, tool_is_irreversible
 from max_agent.kernel.verification import verify
 from max_agent.models.aer import CostReading, usage_from_result
@@ -193,6 +194,10 @@ def finalize_in_session(
     journal = Journal(session)
     attempt_row = session.get(TaskAttemptRow, claim.attempt_id)
     reading, stamp = _usage_stamp(claim, result, attempt_row)
+    if attempt_row is None or attempt_row.fencing_token != claim.fencing_token:
+        raise StaleFenceError(f"attempt {claim.attempt_id} does not match fence {claim.fencing_token}")
+    raw_usage = result.usage if result.usage is not None else result.outputs.get("usage")
+    record_attempt_usage(session, attempt_row, raw=raw_usage, reading=reading)
     journal.append(
         claim.task_id,
         EventType.WORKER_OUTPUT,

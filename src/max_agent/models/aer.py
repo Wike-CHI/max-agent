@@ -7,6 +7,7 @@ Missing usage stays unknown. This module does not invent token or spend figures.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -40,6 +41,8 @@ class CostReading(BaseModel):
     currency: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
     model: str | None = None
     provider: str | None = None
 
@@ -157,7 +160,7 @@ def _text(value: Any, *, limit: int = 128) -> str | None:
 
 
 def _nonneg_float(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         return None
     number = float(value)
     if number < 0 or number != number or number in (float("inf"), float("-inf")):
@@ -184,7 +187,7 @@ def _source(value: Any) -> str:
 
 
 def normalize_usage(raw: Any) -> CostReading:
-    """Copy a worker usage report. Unmarked numbers are dropped, not guessed."""
+    """Preserve explicitly reported tokens; an unmarked amount is not a cost."""
     if isinstance(raw, UsageReport):
         data: dict[str, Any] = raw.model_dump()
     elif isinstance(raw, CostReading):
@@ -198,12 +201,10 @@ def normalize_usage(raw: Any) -> CostReading:
     provider = _text(data.get("provider"))
     source = _source(data.get("source"))
     marker = (_text(data.get("marker"), limit=32) or "").lower()
-    if marker not in _ACCEPTED_MARKERS:
-        return CostReading(source=source, marker=UsageMarker.UNKNOWN.value, model=model, provider=provider)
-
     amount = _nonneg_float(data.get("amount"))
-    if amount is None:
-        return CostReading(source=source, marker=UsageMarker.UNKNOWN.value, model=model, provider=provider)
+    if marker not in _ACCEPTED_MARKERS or amount is None:
+        marker = UsageMarker.UNKNOWN.value
+        amount = None
 
     currency = _text(data.get("currency"), limit=16)
     return CostReading(
@@ -213,6 +214,8 @@ def normalize_usage(raw: Any) -> CostReading:
         currency=currency,
         input_tokens=_nonneg_int(data.get("input_tokens")),
         output_tokens=_nonneg_int(data.get("output_tokens")),
+        cached_input_tokens=_nonneg_int(data.get("cached_input_tokens")),
+        reasoning_tokens=_nonneg_int(data.get("reasoning_tokens")),
         model=model,
         provider=provider,
     )

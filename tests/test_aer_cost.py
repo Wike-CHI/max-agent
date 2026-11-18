@@ -28,7 +28,7 @@ def test_normalize_usage_does_not_invent_numbers():
     unmarked = normalize_usage({"source": "api_spend", "amount": 3, "input_tokens": 10})
     assert unmarked.marker == "unknown"
     assert unmarked.amount is None
-    assert unmarked.input_tokens is None
+    assert unmarked.input_tokens == 10  # reported usage survives unknown cost
     assert unmarked.source == "api_spend"
 
     measured = normalize_usage(

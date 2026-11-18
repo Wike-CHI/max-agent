@@ -181,9 +181,8 @@ def resolve_cli_identity(
     Model comes from CLI JSON, then from ``ANTHROPIC_MODEL`` /
     ``CLAUDE_CODE_SUBAGENT_MODEL`` for Claude. Provider comes from JSON, then
     from the vendor (``xai``, ``openai``, ``anthropic``). A name that is still
-    missing is the string ``unknown``. A cost report is returned only for an
-    explicit measured/estimate amount or a vendor cost field. Other numbers
-    are dropped instead of being stored as ``0``.
+    missing is the string ``unknown``. Reported tokens are retained even when
+    no monetary cost is available; unmarked amounts are not treated as cost.
     """
     env = {} if environ is None else environ
     payload = _parse_cli_json(stdout)
@@ -963,25 +962,37 @@ def _usage_report(
     amount = _number(usage.get("amount"))
     currency = _label(usage.get("currency"), limit=16)
     source = _ledger(usage.get("source"))
+    input_tokens, output_tokens = _token_pair(payload, usage)
+    cached_input_tokens = _whole(usage.get("cached_input_tokens"))
+    reasoning_tokens = _whole(usage.get("reasoning_tokens"))
     if marker is None or amount is None:
         found = _vendor_cost(payload, usage)
-        if found is None:
-            return None
-        amount, vendor_currency = found
-        marker = marker or "measured"
-        currency = vendor_currency or currency
-    if amount is None or marker is None:
+        if found is not None:
+            amount, vendor_currency = found
+            marker = marker or "measured"
+            currency = vendor_currency or currency
+    valid_cost = amount is not None and marker is not None
+    if not valid_cost and all(value is None for value in (input_tokens, output_tokens, cached_input_tokens, reasoning_tokens)):
         return None
     if source is None:
-        source = "api_spend" if currency == "USD" else "cli_quota"
-    report: dict[str, Any] = {"source": source, "marker": marker, "amount": amount}
-    if currency:
+        source = ("api_spend" if currency == "USD" else "cli_quota") if valid_cost else "unknown"
+    report: dict[str, Any] = {"source": source, "marker": marker if valid_cost else "unknown"}
+    if valid_cost:
+        report["amount"] = amount
+    if currency and valid_cost:
         report["currency"] = currency
-    input_tokens, output_tokens = _token_pair(payload, usage)
+    for name in ("billing_mode", "unit"):
+        label = _label(usage.get(name), limit=32)
+        if label:
+            report[name] = label
     if input_tokens is not None:
         report["input_tokens"] = input_tokens
     if output_tokens is not None:
         report["output_tokens"] = output_tokens
+    if cached_input_tokens is not None:
+        report["cached_input_tokens"] = cached_input_tokens
+    if reasoning_tokens is not None:
+        report["reasoning_tokens"] = reasoning_tokens
     if model != "unknown":
         report["model"] = model
     if provider != "unknown":

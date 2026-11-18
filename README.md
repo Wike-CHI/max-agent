@@ -214,7 +214,7 @@ read-only proxy; the Python API and Task DB need a separate reachable backend.
 - usage marker：`measured`（实测）、`estimate`（估算）、`unknown`（未报告）。
 - ledger（成本来源）：`grok_bot_quota`、`cli_quota`、`api_spend`。
 
-CLI 报告里的 `usage.marker` 与金额会写入 `task_attempts`（cost_source / cost_marker / cost_amount / cost_currency / input_tokens / output_tokens）；CLI 未报告成本时这些字段保持 `unknown` 或为空，adapter 不会用 `0` 补齐。细节见 [docs/architecture.md](docs/architecture.md) 与 [docs/operations/worker.md](docs/operations/worker.md)。
+CLI 报告里的 `usage.marker` 与金额会写入 `task_attempts`（cost_source / cost_marker / cost_amount / cost_currency / input_tokens / output_tokens）；CLI 未报告成本时金额与 marker 保持 `unknown` 或为空，已报告的 token 仍保留，adapter 不会用 `0` 补齐。v0.6 的 `usage_records` 按 attempt 幂等记录，明确金额另记入十进制 `cost_entries`；现有预算与 metrics 暂时仍以旧列为输入。细节见 [docs/architecture.md](docs/architecture.md) 与 [docs/operations/worker.md](docs/operations/worker.md)。
 
 ## Goal 与 Agent Team（未完成）
 
