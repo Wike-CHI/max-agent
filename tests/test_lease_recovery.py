@@ -9,7 +9,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy.dialects import postgresql, sqlite
 
-from max_agent.db.models import TaskAttemptRow, TaskRow, utcnow
+from max_agent.db.models import TaskAttemptRow, TaskRow, UsageRecordRow, utcnow
 from max_agent.db.session import get_session_factory, session_scope
 from max_agent.kernel.errors import LeaseHeldError, StaleFenceError
 from max_agent.kernel.lease import renew_lease_in_session, select_task_for_claim
@@ -273,6 +273,7 @@ def test_expired_lease_reclaim_rejects_stale_finalize(db_url: str):
         assert attempts[0].failure_class == FailureClass.CRASH.value
         assert attempts[1].status == "succeeded"
         assert attempts[1].lease_owner == "reclaimer"
+        assert [row.attempt_id for row in session.query(UsageRecordRow).all()] == [attempts[1].id]
 
 
 def test_lost_worker_reclaim_is_single_winner(db_url: str):

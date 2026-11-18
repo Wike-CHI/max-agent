@@ -95,11 +95,17 @@ Worker 返回 `WorkerResult.ok` 只表示执行完成；内核对照 `acceptance
 
 ## 成本与预算
 
-Worker 报告 `usage.source`（`grok_bot_quota` / `cli_quota` / `api_spend`）和 `usage.marker`（`measured` / `estimate`）。没有 marker 的数字会被丢掉。运行时只有在 attempt 的起止时间都存在时记为 `measured`。真实 CLI attempt 额外记下 `model` / `provider`：Claude 先看 CLI JSON，再看 `ANTHROPIC_MODEL`，再看 `CLAUDE_CODE_SUBAGENT_MODEL`；其他厂商只采用 CLI JSON 里的模型名。缺失时是字符串 `unknown`，不会写成 `0`。`usage.marker` 为 `measured` 或 `estimate`，或 CLI JSON 给出了费用字段时，写入 `task_attempts.cost_*`；没有报告则保持 unknown。这只做记录，不选择模型档，也不升级路由。
+Worker 报告 `usage.source`（`grok_bot_quota` / `cli_quota` / `api_spend`）和 `usage.marker`（`measured` / `estimate`）。没有有效 marker 和金额时，金额保持 unknown；明确报告的 token 数仍保留。运行时只有在 attempt 的起止时间都存在时记为 `measured`。真实 CLI attempt 额外记下 `model` / `provider`：Claude 先看 CLI JSON，再看 `ANTHROPIC_MODEL`，再看 `CLAUDE_CODE_SUBAGENT_MODEL`；其他厂商只采用 CLI JSON 里的模型名。缺失时是字符串 `unknown`，不会写成 `0`。`usage.marker` 为 `measured` 或 `estimate`，或 CLI JSON 给出了费用字段时，写入 `task_attempts.cost_*`；没有报告则保持 unknown。这只做记录，不选择模型档，也不升级路由。
 
 `max_cost_units == 0` 表示没有总上限。`budget.ceilings` 按账本单独设上限，`0` 是真实上限。已测花费超过上限时，下一次 claim 不会拿到租约，fencing token 不变。花费未知时不拦截，预算状态为 `unknown`。审批门仍先于预算检查。
 
 指标 `verified_task_rate`、`cost_per_verified_task`、`retry_overhead` 在缺数时返回 `marker=unknown` 且 `value=null`。只有当已验证任务的每一次 attempt 都是 measured、并且都写明了账本时，才会把花费拆开；这时没被用到的账本合计是 0。否则该账本是 `unknown`，不会用 0 填上。
+
+### v0.6 用量契约（Issue #74）
+
+每个完成的 attempt 在同一 finalize 事务写入一条 `usage_records`（`usage.v1`，`source_event_key` 幂等）；有明确 measured/estimate 金额时再写 `cost_entries`，金额采用 Decimal；SQLite 存规范十进制文本（避免 NUMERIC affinity 浮点漂移），Postgres 存 NUMERIC(36,18)，保留原始币种或额度单位。input/output/cached input/reasoning tokens 可以独立于金额存在；没有可靠计费模式时 `billing_mode=unknown`，不能因为金额以 USD 表示就断言 CLI 使用了 API Key。现有 `task_attempts.cost_*` 是兼容投影，当前预算检查与 metrics 仍读取旧列；新账本尚未承担预算控制。当前仍无 Global/Provider 预算预留，旧预算边界保持原语义。
+
+迁移：先在已有库执行 `uv run alembic upgrade head`；`init-db` 的 `create_all` 不会迁移已有库。此版本只新增两表，不回填或改写历史 attempt。回滚到 `f19a0c3d8e21` 会删除两张新表及其中数据，但保留旧 attempt 成本列、任务与 Journal；回滚前应备份数据库。新表建立后才运行新代码，避免新代码写入未迁移数据库。
 
 ## Grok 入口
 

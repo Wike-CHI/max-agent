@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -198,10 +199,15 @@ class UsageReport(BaseModel):
 
     source: str | None = None
     marker: str | None = None
-    amount: float | None = None
+    amount: Decimal | None = None
     currency: str | None = None
+    unit: str | None = None
+    billing_mode: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    compute_seconds: float | None = None
     model: str | None = None
     provider: str | None = None
 

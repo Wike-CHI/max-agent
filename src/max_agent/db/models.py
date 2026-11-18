@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
 from max_agent.db.base import Base
+from max_agent.db.types import ExactDecimal
 
 
 def utcnow() -> datetime:
@@ -132,6 +134,47 @@ class TaskAttemptRow(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     task: Mapped[TaskRow] = relationship(back_populates="attempt_rows")
+
+
+class UsageRecordRow(Base):
+    """One idempotent observed usage report; tokens do not imply a bill."""
+
+    __tablename__ = "usage_records"
+    __table_args__ = (
+        UniqueConstraint("source_event_key", name="uq_usage_records_source_event_key"),
+        Index("ix_usage_records_attempt", "attempt_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    attempt_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_attempts.id"), nullable=False)
+    source_event_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(16), nullable=False, default="usage.v1")
+    provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    billing_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    compute_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class CostEntryRow(Base):
+    """A valued reading in its original unit, separate from token usage."""
+
+    __tablename__ = "cost_entries"
+    __table_args__ = (UniqueConstraint("usage_record_id", name="uq_cost_entries_usage_record"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    usage_record_id: Mapped[str] = mapped_column(String(36), ForeignKey("usage_records.id"), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(ExactDecimal(), nullable=False)
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    billing_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
 class AERExportRow(Base):

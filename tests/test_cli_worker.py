@@ -14,7 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from max_agent.cli.main import app
-from max_agent.db.models import AERExportRow, TaskAttemptRow
+from max_agent.db.models import AERExportRow, CostEntryRow, TaskAttemptRow, UsageRecordRow
 from max_agent.kernel.scheduler import Scheduler
 from max_agent.kernel.service import TaskService
 from max_agent.models.enums import EventType, TaskStatus, WorkerKind
@@ -723,7 +723,8 @@ def test_workspace_outside_allowlist_is_refused(session, tmp_path: Path) -> None
     from max_agent.workers.sandbox import path_is_allowed
 
     # Do not use Path.home(): a regression runner may place HOME under /tmp.
-    outside = Path("/var/tmp/max-agent-cli-outside")
+    # /var/tmp can resolve into /tmp on some runners, which is allowed.
+    outside = Path("/etc/max-agent-cli-outside")
     assert not path_is_allowed(outside, cli_workspace_roots())
     _created, out = _run(
         session,
@@ -1050,7 +1051,14 @@ def test_resolve_cli_identity_prefers_cli_json_and_does_not_invent_cost() -> Non
     )
     assert model == "claude-from-json"
     assert provider == "anthropic"
-    assert usage is None
+    assert usage == {
+        "source": "unknown",
+        "marker": "unknown",
+        "input_tokens": 9,
+        "output_tokens": 4,
+        "model": "claude-from-json",
+        "provider": "anthropic",
+    }
 
     measured = json.dumps(
         {
@@ -1097,7 +1105,43 @@ def test_resolve_cli_identity_prefers_cli_json_and_does_not_invent_cost() -> Non
     model, provider, usage = resolve_cli_identity("codex", unmarked, {})
     assert model == "unknown"
     assert provider == "openai"
-    assert usage is None
+    assert usage is not None
+    assert usage["input_tokens"] == 1
+    assert usage["marker"] == "unknown"
+    assert "amount" not in usage
+
+
+def test_cli_token_only_usage_reaches_attempt_and_aer_without_a_bill(
+    session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    _install_fake_cli(
+        bin_dir, "codex",
+        json.dumps({"model": "fixture-codex", "usage": {
+            "input_tokens": 15, "output_tokens": 3,
+            "cached_input_tokens": 9, "reasoning_tokens": 2,
+        }}),
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("MAX_AGENT_ALLOW_EXTERNAL_CLI", "1")
+    created, out = _run(
+        session, "token only CLI",
+        {"vendor": "codex", "workspace_root": str(tmp_path / "ws")},
+        criteria=["worker_ok", "output_equals:pytest_exit_code=0"],
+    )
+    assert out.status == TaskStatus.SUCCEEDED, out.last_error
+    attempt = _attempt_row(session, created.id)
+    assert attempt.input_tokens == 15
+    assert attempt.output_tokens == 3
+    assert attempt.cost_amount is None
+    assert attempt.cost_marker == "unknown"
+    usage = session.query(UsageRecordRow).filter_by(attempt_id=attempt.id).one()
+    assert usage.cached_input_tokens == 9
+    assert usage.reasoning_tokens == 2
+    assert session.query(CostEntryRow).count() == 0
+    aer = _finished_aer(session, created.id)
+    assert aer["cost"]["input_tokens"] == 15
+    assert aer["cost"]["amount"] is None
 
 
 def _install_fake_cli(bin_dir: Path, vendor: str, stdout: str) -> None:
