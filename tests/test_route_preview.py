@@ -24,7 +24,8 @@ def test_deterministic_candidate_order_and_gates(db_url: str) -> None:
     with session_scope(db_url) as session:
         registry = RegistryService(session)
         account = registry.register_account(owner="user", account_key="primary", provider_key="openai",
-                                            billing_mode="api_metered", enabled=True)
+                                            billing_mode="api_metered", credential_ref="env:OPENAI_API_KEY",
+                                            enabled=True)
         a = registry.register_model(provider_key="openai", model_key="model-a", capabilities=["code"],
                                     supported_efforts=["high"], enabled=True)
         b = registry.register_model(provider_key="openai", model_key="model-b", capabilities=["code"],
@@ -79,6 +80,29 @@ def test_http_preview_requires_auth_and_task_owner(db_url: str) -> None:
         assert before == (session.query(TaskEventRow).count(), session.query(TaskAttemptRow).count())
 
 
+def test_price_and_budget_do_not_override_wrong_credential_binding(db_url: str) -> None:
+    at = datetime.now(timezone.utc)
+    with session_scope(db_url) as session:
+        account = RegistryService(session).register_account(
+            owner="user", account_key="wrong", provider_key="openai", billing_mode="subscription",
+            credential_ref="env:ANTHROPIC_API_KEY", enabled=True,
+        )
+        RegistryService(session).register_model(provider_key="openai", model_key="model-a",
+                                                 capabilities=["code"], enabled=True)
+        task_id = TaskService(session).create(TaskCreate(goal="wrong credential", worker_payload={
+            "route": {"unit": "USD", "upper_bound": "1"}
+        })).id
+        task = session.get(TaskRow, task_id)
+        candidate = RouteService(session).preview(
+            task=task, policy=RoutePolicy(unit="USD", upper_bound=1), at=at,
+            worker_gates={"codex": True}, model_binding_gates={"codex": True},
+        ).candidates[0]
+        assert candidate.account_id == account.id
+        assert "credential_binding_missing" in candidate.reason_codes
+        assert "billing_mode_unsupported" in candidate.reason_codes
+        assert not candidate.dispatchable
+
+
 def test_route_opted_task_cannot_fall_through_to_legacy_dispatch(db_url: str) -> None:
     with session_scope(db_url) as session:
         task_id = TaskService(session).create(TaskCreate(goal="paid route", worker_payload={
@@ -98,7 +122,8 @@ def _routed_claim(db_url: str, *, now: datetime | None = None) -> AttemptClaim:
     with session_scope(db_url) as session:
         registry = RegistryService(session)
         account = registry.register_account(owner="user", account_key="metered", provider_key="openai",
-                                            billing_mode="api_metered", enabled=True)
+                                            billing_mode="api_metered", credential_ref="env:OPENAI_API_KEY",
+                                            enabled=True)
         model = registry.register_model(provider_key="openai", model_key="model-a", capabilities=["code"],
                                         enabled=True)
         registry.add_price(account_id=account.id, model_id=model.id,
@@ -122,6 +147,7 @@ def _routed_claim(db_url: str, *, now: datetime | None = None) -> AttemptClaim:
         assert isinstance(claim, AttemptClaim)
         assert claim.payload["vendor"] == "codex"
         assert claim.payload["model"] == "model-a"
+        assert claim.payload["credential_env"] == "OPENAI_API_KEY"
         assert claim.payload["require_real_worker"] is True
         return claim
 

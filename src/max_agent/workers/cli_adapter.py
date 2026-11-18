@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any
 
 from max_agent.models.enums import WorkerKind
+from max_agent.models.route_contract import ROUTED_CREDENTIAL_ENV
 from max_agent.models.schemas import UsageReport, WorkerResult
 from max_agent.workers.base import Worker, WorkerContext
 from max_agent.workers.sandbox import (
@@ -117,6 +118,7 @@ _NON_RECOVERABLE = frozenset(
         "path_violation",
         "real_worker_required",
         "model_binding_unavailable",
+        "credential_binding_missing",
         "worktree_failed",
         *_DOCUMENT_FAILURES,
     }
@@ -341,11 +343,17 @@ class CliWorker(Worker):
         if failure is None and required and vendor == "stub":
             failure = "real_worker_required"
         bound_model = payload.get("bound_model")
+        credential_env = payload.get("credential_env")
         if failure is None and bound_model is not None and (
             not isinstance(bound_model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", bound_model)
             or vendor not in {"codex", "claude"}
         ):
             failure = "model_binding_unavailable"
+        if failure is None and (bound_model is not None or credential_env is not None):
+            if not isinstance(bound_model, str) or credential_env != ROUTED_CREDENTIAL_ENV.get(vendor):
+                failure = "credential_binding_missing"
+            elif not os.environ.get(credential_env):
+                failure = "credential_binding_missing"
         preflight_error = None
         if failure is None and vendor == "claude":
             preflight = claude_spawn_auth_preflight()
@@ -451,7 +459,10 @@ class CliWorker(Worker):
                 ),
                 bound_model=bound_model,
             )
-            passthrough = _passthrough(vendor)
+            passthrough = (
+                _routed_passthrough(vendor, credential_env)
+                if bound_model is not None else _passthrough(vendor)
+            )
             real = True
 
         env = child_env(
@@ -742,6 +753,14 @@ def _passthrough(vendor: str) -> dict[str, str]:
         if raw:
             values[key] = raw
     return values
+
+
+def _routed_passthrough(vendor: str, credential_env: str, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """One selected API account, without host base URLs, alternate auth, or model overrides."""
+    env = os.environ if environ is None else environ
+    if credential_env != ROUTED_CREDENTIAL_ENV.get(vendor) or not env.get(credential_env):
+        raise ValueError("routed credential is unavailable")
+    return {credential_env: env[credential_env]}
 
 
 @dataclass(frozen=True)

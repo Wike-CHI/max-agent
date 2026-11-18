@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from max_agent.db.models import RouteDecisionRow, TaskAttemptRow, TaskRow, utcnow
 from max_agent.kernel.budget import BudgetService
+from max_agent.models.route_contract import ROUTED_CREDENTIAL_ENV
 from max_agent.kernel.economics import assess_budget
 from max_agent.kernel.errors import ConcurrencyLimitError, LeaseHeldError
 from max_agent.kernel.journal import Journal
@@ -523,6 +524,7 @@ def claim_in_session(
         payload=(
             {**dict(row.worker_payload or {}), "vendor": selected_route.vendor,
              "model": selected_route.model, "bound_model": selected_route.model,
+             "credential_env": ROUTED_CREDENTIAL_ENV[selected_route.vendor],
              "require_real_worker": True}
             if selected_route is not None else dict(row.worker_payload or {})
         ),

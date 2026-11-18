@@ -17,6 +17,7 @@ from max_agent.kernel.budget import BudgetService, _amount
 from max_agent.kernel.registry import RegistryService
 from max_agent.kernel.journal import Journal
 from max_agent.models.enums import EventType
+from max_agent.models.route_contract import ROUTED_CREDENTIAL_ENV
 
 PROVIDER_VENDOR = {"openai": "codex", "anthropic": "claude", "xai": "grok"}
 
@@ -89,6 +90,11 @@ class RouteService:
                 reasons: list[str] = []
                 if not account.enabled:
                     reasons.append("account_disabled")
+                if account.billing_mode != "api_metered":
+                    reasons.append("billing_mode_unsupported")
+                expected_env = ROUTED_CREDENTIAL_ENV.get(vendor or "")
+                if expected_env is None or account.credential_ref != f"env:{expected_env}":
+                    reasons.append("credential_binding_missing")
                 if not model.enabled:
                     reasons.append("model_disabled")
                 if not set(policy.capabilities).issubset(set(model.capabilities or [])):
@@ -136,6 +142,8 @@ class RouteService:
             account is None or model is None or account.owner != task.created_by
             or not account.enabled or not model.enabled or account.provider_key != model.provider_key
             or selected.vendor != PROVIDER_VENDOR.get(account.provider_key)
+            or account.billing_mode != "api_metered"
+            or account.credential_ref != f"env:{ROUTED_CREDENTIAL_ENV.get(selected.vendor, '')}"
             or model.model_key != selected.model
             or not set(policy.capabilities).issubset(set(model.capabilities or []))
             or (policy.effort is not None and policy.effort not in (model.supported_efforts or []))
