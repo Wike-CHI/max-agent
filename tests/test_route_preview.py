@@ -47,7 +47,7 @@ def test_deterministic_candidate_order_and_gates(db_url: str) -> None:
         router = RouteService(session)
         before = (session.query(TaskEventRow).count(), session.query(TaskAttemptRow).count())
         kwargs = {"task": task, "policy": policy, "at": at, "worker_gates": {"codex": True},
-                  "model_binding_gates": {"codex": True}}
+                  "model_binding_gates": {"codex": True}, "spend_cap_gates": {"codex": True}}
         first, again = router.preview(**kwargs), router.preview(**kwargs)
         assert first == again
         assert [c.model for c in first.candidates] == ["model-a", "model-b"]
@@ -57,6 +57,11 @@ def test_deterministic_candidate_order_and_gates(db_url: str) -> None:
         closed = router.preview(task=task, policy=policy, at=at)
         assert closed.selected is None
         assert "model_binding_unavailable" in closed.candidates[0].reason_codes
+        assert "spend_ceiling_unenforced" in closed.candidates[0].reason_codes
+        no_cap = router.preview(task=task, policy=policy, at=at,
+                                worker_gates={"codex": True}, model_binding_gates={"codex": True})
+        assert no_cap.selected is None
+        assert no_cap.candidates[0].reason_codes == ["spend_ceiling_unenforced"]
 
 
 def test_http_preview_requires_auth_and_task_owner(db_url: str) -> None:
@@ -96,6 +101,7 @@ def test_price_and_budget_do_not_override_wrong_credential_binding(db_url: str) 
         candidate = RouteService(session).preview(
             task=task, policy=RoutePolicy(unit="USD", upper_bound=1), at=at,
             worker_gates={"codex": True}, model_binding_gates={"codex": True},
+            spend_cap_gates={"codex": True},
         ).candidates[0]
         assert candidate.account_id == account.id
         assert "credential_binding_missing" in candidate.reason_codes
@@ -142,7 +148,7 @@ def _routed_claim(db_url: str, *, now: datetime | None = None) -> AttemptClaim:
             session, task_id=task_id, worker_id="test", now=instant, ttl_seconds=60,
             req=ScheduleRequest(), automatic=False, backoff_base_seconds=1,
             backoff_cap_seconds=10, route_worker_gates={"codex": True},
-            route_model_gates={"codex": True},
+            route_model_gates={"codex": True}, route_spend_cap_gates={"codex": True},
         )
         assert isinstance(claim, AttemptClaim)
         assert claim.payload["vendor"] == "codex"

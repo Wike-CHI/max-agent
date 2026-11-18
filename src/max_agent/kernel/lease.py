@@ -315,6 +315,7 @@ def claim_in_session(
     max_concurrency: int = 1,
     route_worker_gates: dict[str, bool] | None = None,
     route_model_gates: dict[str, bool] | None = None,
+    route_spend_cap_gates: dict[str, bool] | None = None,
 ) -> AttemptClaim | TaskRead:
     """Commit-ready claim. Caller must commit before worker.run()."""
     from max_agent.kernel.dag import deps_satisfied
@@ -414,6 +415,7 @@ def claim_in_session(
             preview = RouteService(session).preview(
                 task=row, policy=policy, at=now,
                 worker_gates=route_worker_gates, model_binding_gates=route_model_gates,
+                spend_cap_gates=route_spend_cap_gates,
             )
         except ValueError:
             preview = None

@@ -59,6 +59,7 @@ class RouteService:
         self, *, task: TaskRow, policy: RoutePolicy, at: datetime,
         worker_gates: dict[str, bool] | None = None,
         model_binding_gates: dict[str, bool] | None = None,
+        spend_cap_gates: dict[str, bool] | None = None,
     ) -> RoutePreview:
         """No lease, attempt, hold, journal event or credential read is written."""
         instant = at.astimezone(timezone.utc) if at.tzinfo is not None else None
@@ -76,6 +77,7 @@ class RouteService:
             raise ValueError("invalid capability")
         gates = worker_gates or {}
         bindings = model_binding_gates or {}
+        spend_caps = spend_cap_gates or {}
         accounts = self.session.query(ProviderAccountRow).filter_by(owner=task.created_by).order_by(
             ProviderAccountRow.provider_key, ProviderAccountRow.account_key
         ).all()
@@ -109,6 +111,8 @@ class RouteService:
                     reasons.append("worker_gate_closed")
                 if vendor is None or not bindings.get(vendor, False):
                     reasons.append("model_binding_unavailable")
+                if vendor is None or not spend_caps.get(vendor, False):
+                    reasons.append("spend_ceiling_unenforced")
                 price = registry.price_at(owner=task.created_by, account_id=account.id, model_id=model.id, at=instant)
                 if price is None:
                     reasons.append("price_missing")
