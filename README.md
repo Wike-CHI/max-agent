@@ -155,12 +155,18 @@ Every task read/write, queue operation, telemetry, metrics, and AER retry reques
 
 Webhook requests need `MAX_AGENT_WEBHOOK_SECRET` plus headers `X-Max-Timestamp`, `X-Max-Signature` (hex HMAC-SHA256 of `{timestamp}.{raw_body}`), and `X-Max-Delivery-Id`. Replays of the same delivery id return the original task. A new delivery with the same `idempotency_key` attaches to that task and does not start a second one. The handler does not run the worker. The task it creates is owned by the same `MAX_AGENT_API_ACTOR` principal as API-created tasks.
 
-## Read-only MAX console
+## MAX console（只读查询 + P1 写路径）
 
 控制台由 PR #54 引入，已 squash 合入 master（`10a72ada`），不是待合并状态。
 
 The console shows the same task database used by HTTP and MCP, at `/console/`.
-It is **read-only**: it does not submit, approve, cancel, retry, or execute tasks.
+第一版是纯只读查询台。P1 在同一 UI 上补齐**受作用域约束的写能力**：创建（带
+`require_dispatch=true`）、显式派发、审批/拒绝、取消。写操作要求令牌作用域，
+且**同一枚令牌不得同时持有 `dispatch+approve` 或 `create+approve`**（只读卡、写卡、
+审批卡分持）。派发 ≠ 立即执行：需要本机常驻 `max-agent worker`；取消只改任务状态，
+正在运行的 CLI 子进程可能短暂**残留**，本 P1 不接线 `cancel_file`、不保证杀进程。
+浏览器 GUI 尚未完成视觉验收（**未验收**），不得绕过回环/GUI 策略，也不得开公网隧道；
+合法人工复核路径见 [docs/console.md](docs/console.md)。
 
 在 `/console/` 可以查看：任务列表与查询（按 ID / 目标 / issue 引用过滤，带分页）、任务详情、事件 history、trace（尝试、证据、引用）、cost 标记、verification 结果。
 
@@ -180,9 +186,9 @@ uv run alembic upgrade head
 uv run max-agent serve --host 127.0.0.1 --port 8080
 ```
 
-Open `http://127.0.0.1:8080/console/` and enter the configured token. The page
-holds it only in memory and forgets it when disconnected or reloaded. The token
-still has its original API privileges; a read-only page is not a read-only credential.
+Open `http://127.0.0.1:8080/console/` and enter the configured token(s). The page
+holds them only in memory and forgets them when disconnected or reloaded. 令牌本身
+只带注册表里给它的 scope：只读卡只能查询，写卡才能做写操作。
 
 没有前端构建产物时 API 仍可启动，`/console/` 返回 503；构建后重启 API 即可。
 
@@ -192,7 +198,12 @@ same `MAX_AGENT_API_ACTOR` owner. The legacy local CLI remains an administrative
 interface: `create` defaults to owner `user`, and reads are not owner-scoped.
 
 See [console operations and query contracts](docs/console.md) for pagination,
-identity, truthful execution/cost labels, packaging, and limitations.
+identity, truthful execution/cost labels, packaging, and limitations, plus the
+P1 write path: the `MAX_AGENT_API_TOKEN_REGISTRY` token registry, the
+`read`/`create`/`dispatch`/`approve`/`cancel` scopes, `require_dispatch`,
+the separation of duties, the cancel limitation (no `cancel_file`, no process
+kill), the Cloudflare read-only edge, and the still-unverified GUI with its
+manual review path.
 
 ### Cloudflare Workers 边缘部署（尚未公网部署）
 
