@@ -27,7 +27,7 @@ def _create(client, auth_header, make_task_body, **overrides):
 
 
 def _dispatch_body(task: dict) -> dict:
-    return {"expected_version": task["version"], "content_hash": "0" * 64}
+    return {"expected_version": task["version"], "content_hash": task["content_hash"]}
 
 
 def _task_payload(resp) -> dict:
@@ -164,7 +164,11 @@ def test_approve_does_not_ready_undispatched_task(client, auth_header, make_task
     assert task["awaiting_dispatch"] is True
     resp = client.post(
         f"/v1/tasks/{task['id']}/approve",
-        json={"note": "must not ready an undispatched task"},
+        json={
+            "note": "must not ready an undispatched task",
+            "expected_version": task["version"],
+            "content_hash": task["content_hash"],
+        },
         headers=auth_header("test-approve"),
     )
     assert resp.status_code in (200, 409), resp.text

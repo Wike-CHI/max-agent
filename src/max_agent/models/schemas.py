@@ -154,6 +154,7 @@ class TaskRead(BaseModel):
     issue_ref: str | None = None
     version: int = 0
     awaiting_dispatch: bool = False
+    content_hash: str = ""
     idempotent_replay: bool = Field(
         default=False,
         exclude=True,
@@ -175,6 +176,8 @@ class TaskEventRead(BaseModel):
 
 
 class ApproveRequest(BaseModel):
+    expected_version: int
+    content_hash: str
     actor: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=2000)
     scope: list[str] = Field(
@@ -185,6 +188,8 @@ class ApproveRequest(BaseModel):
 
 
 class RejectRequest(BaseModel):
+    expected_version: int
+    content_hash: str
     actor: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=2000)
 
@@ -250,6 +255,18 @@ class DispatchRequest(BaseModel):
 
     The dispatch gate (version / content-hash checks) is enforced by a later
     task; the fields exist so the endpoint has a stable request shape.
+    """
+
+    expected_version: int
+    content_hash: str
+
+
+class CancelRequest(BaseModel):
+    """Body of POST /v1/tasks/{task_id}/cancel.
+
+    Both fields are required: the caller names the exact task state it wants
+    to cancel (version + content hash). A mismatch is a conflict, and a
+    cancelled task stays cancelled — the request never revives it.
     """
 
     expected_version: int

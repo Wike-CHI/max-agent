@@ -18,6 +18,8 @@ def _ceiling(raw: dict, source: str) -> float | None:
 
 
 def task_to_read(row: TaskRow) -> TaskRead:
+    from max_agent.kernel.service import content_hash_of
+
     raw_ceilings = dict(row.budget_ceilings or {})
     budget = BudgetConstraints(
         max_attempts=row.max_attempts,
@@ -62,4 +64,5 @@ def task_to_read(row: TaskRow) -> TaskRead:
         issue_ref=row.issue_ref,
         version=int(row.version or 0),
         awaiting_dispatch=bool(row.awaiting_dispatch),
+        content_hash=content_hash_of(row),
     )

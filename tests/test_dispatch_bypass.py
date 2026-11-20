@@ -127,7 +127,7 @@ def test_http_queue_run_does_not_pick_awaiting_dispatch_tasks(client, auth_heade
 def test_dispatch_lease_held_error_is_http_409(client, auth_header, make_task_body, monkeypatch):
     task = _create_gated(client, auth_header, make_task_body)
 
-    def boom(self, task_id: str):
+    def boom(self, task_id: str, **kwargs):
         raise LeaseHeldError(f"concurrent update on task {task_id}")
 
     monkeypatch.setattr("max_agent.kernel.service.TaskService.dispatch", boom)
@@ -143,7 +143,7 @@ def test_dispatch_other_exceptions_are_not_swallowed(client, auth_header, make_t
     """raise_server_exceptions=False so an unhandled error is observed as HTTP 500, not a client-side re-raise."""
     task = _create_gated(client, auth_header, make_task_body)
 
-    def boom(self, task_id: str):
+    def boom(self, task_id: str, **kwargs):
         raise RuntimeError("unexpected dispatch failure")
 
     monkeypatch.setattr("max_agent.kernel.service.TaskService.dispatch", boom)

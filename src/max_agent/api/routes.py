@@ -35,6 +35,7 @@ from max_agent.models.aer import EconomicsReport, ExportRetryResult, TaskTrace
 from max_agent.models.enums import TaskStatus
 from max_agent.models.schemas import (
     ApproveRequest,
+    CancelRequest,
     DispatchRequest,
     InboundEvent,
     RejectRequest,
@@ -189,11 +190,25 @@ def schedule_task(
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskRead)
-def cancel_task(task_id: str, context: AuthContext = Depends(require_scope(CANCEL))) -> TaskRead:
+def cancel_task(
+    task_id: str,
+    body: CancelRequest,
+    context: AuthContext = Depends(require_scope(CANCEL)),
+) -> TaskRead:
+    """Cancel a task. The body names the exact state the caller cancels.
+
+    A missing `expected_version` / `content_hash` is a 4xx: the caller must
+    say which task state it acts on. A cancelled task stays cancelled.
+    """
     try:
         with session_scope() as session:
             authorize_task(session, task_id, context.principal)
-            return TaskService(session).cancel(task_id)
+            return TaskService(session).cancel(
+                task_id,
+                expected_version=body.expected_version,
+                content_hash=body.content_hash,
+                token_id=context.token_id,
+            )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -218,10 +233,9 @@ def task_status(task_id: str, context: AuthContext = Depends(require_scope(READ)
 @router.post("/tasks/{task_id}/approve")
 def approve_task(
     task_id: str,
-    body: ApproveRequest | None = None,
+    body: ApproveRequest,
     context: AuthContext = Depends(require_scope(APPROVE)),
 ) -> dict:
-    body = body or ApproveRequest()
     require_actor_match(context.principal, body.actor)
     try:
         with session_scope() as session:
@@ -232,6 +246,9 @@ def approve_task(
                 note=body.note,
                 scope=list(body.scope),
                 ttl_seconds=body.ttl_seconds,
+                expected_version=body.expected_version,
+                content_hash=body.content_hash,
+                token_id=context.token_id,
             )
         return envelope(command="approve", task=task)
     except KeyError as exc:
@@ -243,15 +260,21 @@ def approve_task(
 @router.post("/tasks/{task_id}/reject")
 def reject_task(
     task_id: str,
-    body: RejectRequest | None = None,
+    body: RejectRequest,
     context: AuthContext = Depends(require_scope(APPROVE)),
 ) -> dict:
-    body = body or RejectRequest()
     require_actor_match(context.principal, body.actor)
     try:
         with session_scope() as session:
             authorize_task(session, task_id, context.principal)
-            task = TaskService(session).reject(task_id, actor=context.principal, note=body.note)
+            task = TaskService(session).reject(
+                task_id,
+                actor=context.principal,
+                note=body.note,
+                expected_version=body.expected_version,
+                content_hash=body.content_hash,
+                token_id=context.token_id,
+            )
         return envelope(command="reject", task=task)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -262,7 +285,7 @@ def reject_task(
 @router.post("/tasks/{task_id}/dispatch")
 def dispatch_task(
     task_id: str,
-    body: DispatchRequest | None = None,
+    body: DispatchRequest,
     context: AuthContext = Depends(require_scope(DISPATCH)),
 ) -> dict:
     """Hand an approved task over to its worker.
@@ -279,7 +302,15 @@ def dispatch_task(
             dispatch = getattr(service, "dispatch", None)
             if dispatch is None:
                 raise HTTPException(status_code=501, detail="dispatch is not implemented yet")
-            task = dispatch(task_id) or task
+            task = (
+                dispatch(
+                    task_id,
+                    expected_version=body.expected_version,
+                    content_hash=body.content_hash,
+                    token_id=context.token_id,
+                )
+                or task
+            )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (LeaseHeldError, ValueError) as exc:

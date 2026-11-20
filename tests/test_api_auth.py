@@ -84,6 +84,14 @@ def test_health_ready_are_anonymous_and_invalid_or_unconfigured_tokens_fail(
     assert client.get("/v1/tasks").status_code == 401
 
 
+
+def _write_body(task: dict, **extra) -> dict:
+    """Carry required CAS fields so auth assertions are reached, not schema 422."""
+    body = {"expected_version": task["version"], "content_hash": task["content_hash"]}
+    body.update(extra)
+    return body
+
+
 def test_approval_actor_comes_from_principal_and_forgery_is_rejected(
     client: TestClient, create_task, auth_header
 ) -> None:
@@ -95,24 +103,33 @@ def test_approval_actor_comes_from_principal_and_forgery_is_rejected(
     approve_headers = auth_header("test-approve")
 
     forged = client.post(
-        f"/v1/tasks/{task_id}/approve", json={"actor": "mallory"}, headers=approve_headers
+        f"/v1/tasks/{task_id}/approve",
+        json=_write_body(task, actor="mallory"),
+        headers=approve_headers,
     )
     assert forged.status_code == 403
     fetched = client.get(f"/v1/tasks/{task_id}", headers=auth_header("test-read"))
     assert fetched.json()["approved_by"] is None
 
     approved = client.post(
-        f"/v1/tasks/{task_id}/approve", json={"note": "allowed"}, headers=approve_headers
+        f"/v1/tasks/{task_id}/approve",
+        json=_write_body(task, note="allowed"),
+        headers=approve_headers,
     )
     assert approved.status_code == 200
     assert approved.json()["task"]["approved_by"] == "alice"
+    granted = approved.json()["task"]
 
     forged_reject = client.post(
-        f"/v1/tasks/{task_id}/reject", json={"actor": "mallory"}, headers=approve_headers
+        f"/v1/tasks/{task_id}/reject",
+        json=_write_body(granted, actor="mallory"),
+        headers=approve_headers,
     )
     assert forged_reject.status_code == 403
     rejected = client.post(
-        f"/v1/tasks/{task_id}/reject", json={"actor": "alice"}, headers=approve_headers
+        f"/v1/tasks/{task_id}/reject",
+        json=_write_body(granted, actor="alice"),
+        headers=approve_headers,
     )
     assert rejected.status_code == 200
     assert rejected.json()["task"]["approval_decision"] == "rejected"
@@ -130,6 +147,8 @@ def test_other_principal_cannot_read_or_mutate_task(
     monkeypatch.setenv("MAX_AGENT_API_ACTOR", "bob")
 
     assert client.get("/v1/tasks", headers=auth_header("test-read")).json() == []
+    write = _write_body(task)
+    cas_suffixes = ("/cancel", "/approve", "/reject")
     for method, path, headers in [
         ("get", f"/v1/tasks/{task_id}", auth_header("test-read")),
         ("get", f"/v1/tasks/{task_id}/status", auth_header("test-read")),
@@ -140,10 +159,14 @@ def test_other_principal_cannot_read_or_mutate_task(
         ("post", f"/v1/tasks/{task_id}/approve", auth_header("test-approve")),
         ("post", f"/v1/tasks/{task_id}/reject", auth_header("test-approve")),
     ]:
-        response = client.request(
-            method, path, json={} if method == "post" else None, headers=headers
-        )
-        assert response.status_code == 403
+        if method == "post" and path.endswith(cas_suffixes):
+            body = write
+        elif method == "post":
+            body = {}
+        else:
+            body = None
+        response = client.request(method, path, json=body, headers=headers)
+        assert response.status_code == 403, (path, response.status_code, response.text)
 
     replay = client.post(
         "/v1/tasks",

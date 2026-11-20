@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import timedelta
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -33,6 +35,91 @@ from max_agent.models.schemas import (
     TaskRead,
 )
 from max_agent.policy.approval import sensitive_tags
+
+HASH_FIELDS: tuple[str, ...] = (
+    "goal",
+    "acceptance_criteria",
+    "worker_kind",
+    "worker_payload",
+    "tags",
+    "dependencies",
+    "has_side_effects",
+    "issue_ref",
+    "priority",
+    "timeout_seconds",
+    "max_attempts",
+    "max_cost_units",
+    "allow_auto_retry_side_effects",
+)
+_BOOL_HASH_FIELDS = {"has_side_effects", "allow_auto_retry_side_effects"}
+_LIST_HASH_FIELDS = {"tags", "dependencies"}
+_BUDGET_HASH_FIELDS = {"max_cost_units", "allow_auto_retry_side_effects"}
+
+# States a task can still be in when its dispatch gate was already cleared.
+# Re-dispatching such a task is the idempotent success path (no version bump);
+# every other state (cancelled, terminal, in flight) is a conflict.
+DISPATCH_REPLAYABLE_STATES = frozenset(
+    {TaskStatus.BLOCKED, TaskStatus.WAITING_APPROVAL, TaskStatus.READY}
+)
+
+
+class TaskStateConflict(ValueError):
+    """状态 / 版本 / 哈希不匹配；HTTP 层映射为 409。"""
+
+
+def canonical_json(payload: Mapping[str, Any]) -> bytes:
+    """UTF-8、键按字典序排序、无多余空白的 JSON。"""
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _field(source: Any, name: str) -> Any:
+    budget = None
+    if isinstance(source, Mapping):
+        if name in source and name not in _BUDGET_HASH_FIELDS:
+            value = source[name]
+        else:
+            budget = source.get("budget")
+            if name in _BUDGET_HASH_FIELDS and budget is not None:
+                if isinstance(budget, Mapping):
+                    value = budget.get(name, source.get(name))
+                else:
+                    value = getattr(budget, name, source.get(name))
+            else:
+                value = source.get(name)
+    else:
+        if name in _BUDGET_HASH_FIELDS and getattr(source, "budget", None) is not None:
+            budget = source.budget
+            if isinstance(budget, Mapping):
+                value = budget.get(name, getattr(source, name, None))
+            else:
+                value = getattr(budget, name, getattr(source, name, None))
+        else:
+            value = getattr(source, name, None)
+    if hasattr(value, "value") and not isinstance(value, (str, bytes, bool, int, float, list, dict)):
+        value = value.value
+    return value
+
+
+def content_hash_of(source: Any) -> str:
+    """13 个固定字段的 SHA-256 小写 hex；version / id / status 不参与。"""
+    material: dict[str, Any] = {}
+    for name in HASH_FIELDS:
+        value = _field(source, name)
+        if name in _LIST_HASH_FIELDS:
+            value = list(value or [])
+        elif name in _BOOL_HASH_FIELDS:
+            value = bool(value)
+        material[name] = value
+    return hashlib.sha256(canonical_json(material)).hexdigest()
+
+
+def task_content_hash(task: Any) -> str:
+    return content_hash_of(task)
 
 
 class TaskService:
@@ -186,11 +273,30 @@ class TaskService:
         self.session.flush()
         return [self._to_read(row) for row in rows]
 
-    def cancel(self, task_id: str) -> TaskRead:
+    def cancel(
+        self,
+        task_id: str,
+        *,
+        expected_version: int | None = None,
+        content_hash: str | None = None,
+        token_id: str | None = None,
+    ) -> TaskRead:
+        """Cancel a task. A cancelled task stays cancelled.
+
+        `expected_version` and `content_hash` name the exact task state the
+        caller acts on: a mismatch is a conflict and the task is left exactly
+        as it was. A terminal task (cancelled, succeeded) is a conflict too —
+        a replayed cancel never revives it. Without both fields the legacy
+        behaviour applies: the task is cancelled without a version check.
+        """
         row = self._get_row(task_id)
         status = TaskStatus(row.status)
         if status in TERMINAL:
+            # A cancelled task is terminal: cancelling it again is a conflict,
+            # not a way back into the state machine.
             raise ValueError(f"cannot cancel terminal task in status={status}")
+        self._check_expected_version(row, expected_version)
+        self._check_content_hash(row, content_hash)
         requested = utcnow()
         self._transition(
             row,
@@ -204,7 +310,7 @@ class TaskService:
             task_id,
             EventType.CANCELLED,
             "task cancelled",
-            {"signal": "cancel", "at": requested.isoformat()},
+            {"signal": "cancel", "at": requested.isoformat(), "token_id": token_id},
         )
         self.session.flush()
         return self._to_read(row)
@@ -217,6 +323,9 @@ class TaskService:
         note: str = "",
         scope: list[str] | None = None,
         ttl_seconds: int | None = None,
+        expected_version: int | None = None,
+        content_hash: str | None = None,
+        token_id: str | None = None,
     ) -> TaskRead:
         """Record an explicit user grant. Sensitive tags cannot run without it.
 
@@ -241,6 +350,13 @@ class TaskService:
             raise ValueError(f"approval scope does not cover sensitive tags: {missing}")
         if ttl_seconds is not None and ttl_seconds < 1:
             raise ValueError("ttl_seconds must be >= 1")
+        # A replay of an already applied grant (same token, same command) is a
+        # no-op: no CAS write, no version bump, no repeated side effect. A
+        # replay never shrinks the recorded grant.
+        if self._approve_replay_hit(row, token_id=token_id, content_hash=content_hash, scope=chosen):
+            return self._to_read(row)
+        self._check_expected_version(row, expected_version)
+        self._check_content_hash(row, content_hash)
         now = utcnow()
         extra = {
             "approved_at": now,
@@ -272,12 +388,27 @@ class TaskService:
             task_id,
             EventType.APPROVED,
             f"approved by {actor_name}",
-            {"actor": actor_name, "note": note_value or "", "scope": chosen, "ttl_seconds": ttl_seconds},
+            {
+                "actor": actor_name,
+                "note": note_value or "",
+                "scope": chosen,
+                "ttl_seconds": ttl_seconds,
+                "token_id": token_id,
+            },
         )
         self.session.flush()
         return self._to_read(row)
 
-    def reject(self, task_id: str, *, actor: str = "user", note: str = "") -> TaskRead:
+    def reject(
+        self,
+        task_id: str,
+        *,
+        actor: str = "user",
+        note: str = "",
+        expected_version: int | None = None,
+        content_hash: str | None = None,
+        token_id: str | None = None,
+    ) -> TaskRead:
         """Revoke execution. A later approve() is a new grant; this call never runs a worker."""
         row = self._get_row(task_id)
         status = TaskStatus(row.status)
@@ -285,6 +416,13 @@ class TaskService:
             raise ValueError(f"cannot reject task in status={status.value}")
         if status in {TaskStatus.LEASED, TaskStatus.RUNNING, TaskStatus.VERIFYING}:
             raise ValueError(f"cannot reject in-flight task status={status.value}")
+
+        # A replay of an already applied rejection (same token, same command)
+        # is a no-op: no CAS write, no version bump, no repeated side effect.
+        if self._reject_replay_hit(row, token_id=token_id, content_hash=content_hash):
+            return self._to_read(row)
+        self._check_expected_version(row, expected_version)
+        self._check_content_hash(row, content_hash)
 
         actor_name = (actor or "user").strip()[:128] or "user"
         note_value = note.strip() if note else None
@@ -318,7 +456,7 @@ class TaskService:
             task_id,
             EventType.APPROVAL_REJECTED,
             "approval rejected",
-            {"actor": actor_name, "note": note_value or ""},
+            {"actor": actor_name, "note": note_value or "", "token_id": token_id},
         )
         self.session.flush()
         return self._to_read(row)
@@ -333,19 +471,49 @@ class TaskService:
 
         return Scheduler(self.session, worker_id=self.worker_id).run_one(task_id, req)
 
-    def dispatch(self, task_id: str) -> TaskRead:
+    def dispatch(
+        self,
+        task_id: str,
+        *,
+        expected_version: int | None = None,
+        content_hash: str | None = None,
+        token_id: str | None = None,
+    ) -> TaskRead:
         """Release a dispatch-gated task into the normal state machine.
 
         This is a state transition only: no worker runs here, no lease is
         taken and the scheduler is never called. The task leaves the gate and
         then follows the normal rules (dependencies, sensitive tags).
 
-        Dispatching a task that is not awaiting dispatch is a no-op: the read
-        model comes back unchanged and the version is not bumped.
+        Two shapes, one contract:
+
+        - The gate is still closed: the caller names the exact state it wants
+          to release (`expected_version` + `content_hash`). The gate is
+          cleared and the task continues through the normal state machine.
+        - The gate is already open: dispatching again is the idempotent
+          success path — the same read model, no version bump — but only while
+          the task is still in a state a dispatch could have produced
+          (`blocked`, `waiting_approval`, `ready`). Anything else (cancelled,
+          terminal, in flight) is a conflict: a replay must never revive a
+          task that already left the gate.
         """
         row = self._get_row(task_id)
         if not bool(row.awaiting_dispatch):
+            # The gate is already open. A wrong hash still means "not this
+            # task state". The version is deliberately not checked here: a
+            # replay carries the version it saw before the gate was cleared.
+            self._check_content_hash(row, content_hash)
+            status = TaskStatus(row.status)
+            if status not in DISPATCH_REPLAYABLE_STATES:
+                raise TaskStateConflict(
+                    f"task {row.id} is not dispatchable in status={status.value}"
+                )
             return self._to_read(row)
+
+        # The gate is still closed: the caller must describe the exact state it
+        # wants to release.
+        self._check_expected_version(row, expected_version)
+        self._check_content_hash(row, content_hash)
 
         gate = {"awaiting_dispatch": False}
         if TaskStatus(row.status) not in TERMINAL:
@@ -355,6 +523,16 @@ class TaskService:
             # status); clear the gate on its own.
             if not cas_update(self.session, row, gate):
                 raise LeaseHeldError(f"concurrent update on task {task_id}")
+        self.journal.append(
+            task_id,
+            EventType.DISPATCHED,
+            "task dispatched",
+            {
+                "signal": "dispatch",
+                "token_id": token_id,
+                "status": TaskStatus(row.status).value,
+            },
+        )
         self.session.flush()
         return self._to_read(row)
 
@@ -375,6 +553,158 @@ class TaskService:
         return self._to_read(row)
 
     # ----- internals -----
+
+    def _check_expected_version(self, row: TaskRow, expected_version: int | None) -> None:
+        """Optimistic concurrency guard: the caller must name the version it saw."""
+        if expected_version is None:
+            return
+        try:
+            wanted = int(expected_version)
+        except (TypeError, ValueError):
+            raise TaskStateConflict(f"expected_version is not an integer on task {row.id}")
+        current = int(row.version or 0)
+        if wanted != current:
+            raise TaskStateConflict(
+                f"version conflict on task {row.id}: expected {wanted}, current {current}"
+            )
+
+    def _check_content_hash(self, row: TaskRow, content_hash: str | None) -> None:
+        """The caller must name the content hash of the task it acts on."""
+        if content_hash is None:
+            return
+        current = content_hash_of(row)
+        if str(content_hash) != current:
+            raise TaskStateConflict(f"content hash mismatch on task {row.id}")
+
+    def _event_kind(self, event: Any) -> str:
+        raw = getattr(event, "event_type", None)
+        try:
+            return str(EventType(raw).value)
+        except (TypeError, ValueError):
+            return str(raw)
+
+    def _event_payload(self, event: Any) -> dict[str, Any]:
+        payload = getattr(event, "payload", None) or {}
+        if isinstance(payload, (bytes, bytearray)):
+            try:
+                payload = payload.decode("utf-8")
+            except (UnicodeDecodeError, ValueError):
+                return {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                return {}
+        if isinstance(payload, Mapping):
+            return dict(payload)
+        return {}
+
+    def _event_order(self, event: Any) -> tuple[int, float]:
+        created = getattr(event, "created_at", None)
+        if created is None:
+            return (0, 0.0)
+        try:
+            return (1, float(created.timestamp()))
+        except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+            return (0, 0.0)
+
+    def _latest_decision(self, task_id: str) -> tuple[str, dict[str, Any]] | None:
+        """The most recent approve/reject decision recorded for a task.
+
+        Only the latest decision may be replayed: a grant that was revoked by a
+        later rejection is not a valid replay target anymore.
+        """
+        try:
+            events = list(self.journal.list_for_task(task_id, limit=1000))
+        except TypeError:
+            events = list(self.journal.list_for_task(task_id))
+        kinds = {str(EventType.APPROVED.value), str(EventType.APPROVAL_REJECTED.value)}
+        best: tuple[str, dict[str, Any]] | None = None
+        best_key: tuple[int, float] | None = None
+        for event in events:
+            kind = self._event_kind(event)
+            if kind not in kinds:
+                continue
+            key = self._event_order(event)
+            if best_key is None or key >= best_key:
+                best_key = key
+                best = (kind, self._event_payload(event))
+        return best
+
+    def _token_matches(self, payload: Mapping[str, Any], token_id: str | None) -> bool:
+        if not token_id:
+            return False
+        recorded = payload.get("token_id")
+        if recorded is None:
+            return False
+        return str(recorded) == str(token_id)
+
+    def _approve_replay_hit(
+        self,
+        row: TaskRow,
+        *,
+        token_id: str | None,
+        content_hash: str | None,
+        scope: list[str],
+    ) -> bool:
+        """True when this approve command was already applied to this task.
+
+        A replay needs the same token, the same content, a grant that is still
+        in force, and — the part that matters — a request scope that the
+        recorded grant already covers: `request scope ⊆ granted scope`.
+        A wider request scope is a new grant, not a replay, and a narrower one
+        never shrinks the grant that is already on the task.
+        """
+        if not token_id:
+            return False
+        if content_hash is None or str(content_hash) != content_hash_of(row):
+            return False
+        if str(getattr(row, "approval_decision", "") or "") != "granted":
+            return False
+        expires = getattr(row, "approval_expires_at", None)
+        if expires is not None:
+            try:
+                now = utcnow()
+                if getattr(expires, "tzinfo", None) is None:
+                    expires = expires.replace(tzinfo=now.tzinfo)
+                if expires <= now:
+                    return False
+            except (TypeError, AttributeError):
+                pass
+        granted = [str(item) for item in (getattr(row, "approval_scope", None) or [])]
+        if not set(scope).issubset(set(granted)):
+            # The request scope is not covered by the existing grant: this is a
+            # different command, not a replay of the one already applied.
+            return False
+        latest = self._latest_decision(row.id)
+        if latest is None:
+            return False
+        kind, payload = latest
+        if kind != str(EventType.APPROVED.value):
+            return False
+        return self._token_matches(payload, token_id)
+
+    def _reject_replay_hit(
+        self,
+        row: TaskRow,
+        *,
+        token_id: str | None,
+        content_hash: str | None,
+    ) -> bool:
+        """True when this reject command was already applied to this task."""
+        if not token_id:
+            return False
+        if content_hash is not None and str(content_hash) != content_hash_of(row):
+            return False
+        if str(getattr(row, "approval_decision", "") or "") != "rejected":
+            return False
+        latest = self._latest_decision(row.id)
+        if latest is None:
+            return False
+        kind, payload = latest
+        if kind != str(EventType.APPROVAL_REJECTED.value):
+            return False
+        return self._token_matches(payload, token_id)
 
     def _idempotent_hit(self, key: str, *, created_by: str) -> TaskRead | None:
         existing = self.session.query(TaskRow).filter(TaskRow.idempotency_key == key).one_or_none()

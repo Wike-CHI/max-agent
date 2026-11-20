@@ -29,6 +29,7 @@ REGISTRY_TOKENS: dict[str, dict[str, Any]] = {
     "test-read": {"secret": "test-read-secret", "scopes": ["read"]},
     "test-create": {"secret": "test-create-secret", "scopes": ["create"]},
     "test-approve": {"secret": "test-approve-secret", "scopes": ["approve"]},
+    "test-approve-alt": {"secret": "test-approve-alt-secret", "scopes": ["approve"]},
     "test-dispatch": {"secret": "test-dispatch-secret", "scopes": ["dispatch"]},
     "test-cancel": {"secret": "test-cancel-secret", "scopes": ["cancel"]},
     "test-execute-inline": {"secret": "test-execute-inline-secret", "scopes": ["execute_inline"]},

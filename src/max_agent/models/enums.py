@@ -62,6 +62,7 @@ class EventType(StrEnum):
     WORKER_OUTPUT = "worker_output"
     ERROR = "error"
     CANCELLED = "cancelled"
+    DISPATCHED = "dispatched"
     APPROVAL_REQUIRED = "approval_required"
     APPROVED = "approved"
     APPROVAL_REJECTED = "approval_rejected"
